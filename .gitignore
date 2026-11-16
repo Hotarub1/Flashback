@@ -4,3 +4,6 @@ obj/
 dist/
 *.user
 .vs/
+
+# FFmpeg, downloaded here by build.ps1 (over GitHub's 100 MB file limit)
+tools/
