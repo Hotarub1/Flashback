@@ -28,7 +28,8 @@ To exit, right-click the tray icon and choose **Exit**.
 | Desktop audio | Record game and PC sound | On |
 | Microphone | Record your microphone, choose which one, and set its volume | On, Windows default device |
 | Start with Windows | Start in the background when you sign in | Off |
-| Sound and on-screen notice | Confirmation when a clip is saved | On |
+| Hotkey sound | Plays the moment you press the hotkey. **Choose sound…** takes any audio file (its first 5 seconds); clip audio ends at the press, so the sound is not in the clip | On, built-in chime |
+| On-screen notice | Shows that a clip is being saved, then whether it worked | On |
 
 ## How it stays reliable
 
@@ -55,6 +56,7 @@ The status bar at the bottom of the window shows whether recording and both audi
 |---|---|
 | Clips | `Videos\Clips` (changeable) |
 | Settings | `%APPDATA%\Flashback\settings.json` |
+| Your hotkey sound (converted to WAV) | `%APPDATA%\Flashback\hotkey-sound.wav` |
 | Buffer, thumbnail cache, logs | `%LOCALAPPDATA%\Flashback` |
 
 ## Building

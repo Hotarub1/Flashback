@@ -558,7 +558,53 @@ public partial class MainWindow : Window
         TrayCheck.IsChecked = s.CloseToTray;
         SoundCheck.IsChecked = s.PlaySound;
         ToastCheck.IsChecked = s.ShowToast;
+        UpdateSoundRow(s);
         UpdateHints(s);
+    }
+
+    private void UpdateSoundRow(AppSettings s)
+    {
+        SoundNameText.Text = s.HotkeySoundName ?? "Built-in chime";
+        SoundNameText.ToolTip = s.HotkeySoundName;
+        DefaultSoundButton.Visibility = s.HotkeySoundName != null ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async void ChooseSound_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Choose the hotkey sound",
+            Filter = "Audio files|*.wav;*.mp3;*.ogg;*.oga;*.opus;*.flac;*.m4a;*.aac;*.wma;*.aiff;*.aif|All files|*.*",
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        ChooseSoundButton.IsEnabled = PreviewSoundButton.IsEnabled = DefaultSoundButton.IsEnabled = false;
+        SoundNameText.Text = "Converting…";
+        try
+        {
+            string? error = await _engine.SetHotkeySoundAsync(dialog.FileName);
+            if (error != null)
+                MessageBox.Show(this, $"\"{Path.GetFileName(dialog.FileName)}\" cannot be used as the hotkey sound.\n\n{error}",
+                    "Hotkey sound", MessageBoxButton.OK, MessageBoxImage.Warning);
+            else
+                Sounds.Hotkey(); // let the user hear what they picked
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Choosing the hotkey sound failed", ex);
+        }
+        finally
+        {
+            ChooseSoundButton.IsEnabled = PreviewSoundButton.IsEnabled = DefaultSoundButton.IsEnabled = true;
+            UpdateSoundRow(_engine.Settings.Current);
+        }
+    }
+
+    private void PreviewSound_Click(object sender, RoutedEventArgs e) => Sounds.Hotkey();
+
+    private void DefaultSound_Click(object sender, RoutedEventArgs e)
+    {
+        _engine.ResetHotkeySound();
+        UpdateSoundRow(_engine.Settings.Current);
     }
 
     private void FillMicDevices(string? selectedId)

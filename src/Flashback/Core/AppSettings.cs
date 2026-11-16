@@ -27,7 +27,10 @@ public sealed class AppSettings
     public string? MicDeviceId { get; set; }
     public int MicVolume { get; set; } = 100;
 
+    /// <summary>Play a sound the moment the clip hotkey is pressed.</summary>
     public bool PlaySound { get; set; } = true;
+    /// <summary>Name of the file the user picked as the hotkey sound (kept converted in <see cref="Sounds.CustomFile"/>). Null: the built-in chime.</summary>
+    public string? HotkeySoundName { get; set; }
     public bool ShowToast { get; set; } = true;
     public bool StartWithWindows { get; set; }
     public bool CloseToTray { get; set; } = true;
@@ -52,6 +55,7 @@ public sealed class AppSettings
         MicVolume = Math.Clamp(MicVolume, 0, 300);
         HotkeyModifiers &= 0xF;
         if (string.IsNullOrWhiteSpace(MicDeviceId)) MicDeviceId = null;
+        if (string.IsNullOrWhiteSpace(HotkeySoundName)) HotkeySoundName = null;
     }
 
     /// <summary>Constant-quality level and bitrate ceiling for a given quality preset and frame size.</summary>

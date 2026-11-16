@@ -159,11 +159,14 @@ public partial class App : Application
         {
             AppSettings s = _settings.Current;
             if (_engine.Clips?.IsBusy == true) return;
+            // The save notes the press time first; the sound starts just after, so the clip's audio can end
+            // before it and the sound is not recorded into the clip.
+            Task<ClipResult> saving = _engine.SaveClipAsync(silenceAfterPress: s.PlaySound);
+            if (s.PlaySound) Sounds.Hotkey();
             if (s.ShowToast) _toast?.ShowMessage("Saving clip…", "", false);
-            ClipResult r = await _engine.SaveClipAsync();
+            ClipResult r = await saving;
             if (r.Ok)
             {
-                if (s.PlaySound) Sounds.Saved();
                 if (s.ShowToast) _toast?.ShowMessage("Clip saved", $"{Math.Round(r.Seconds)} seconds  ·  {Path.GetFileName(r.Path)}", false);
                 _window?.OnClipSaved();
             }

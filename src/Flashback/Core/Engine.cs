@@ -60,6 +60,7 @@ public sealed class Engine : IDisposable
         }
         catch { }
         ClipLibrary.RemoveStaleParts(s.SaveFolder);
+        if (s.HotkeySoundName != null) Sounds.UseCustom(true);
         Mic.SetDevice(s.MicDeviceId);
         if (s.DesktopAudio) Desktop.Start();
         if (s.Microphone) Mic.Start();
@@ -175,10 +176,35 @@ public sealed class Engine : IDisposable
         }
     }
 
-    public Task<ClipResult> SaveClipAsync()
+    /// <param name="silenceAfterPress">The hotkey sound is about to play: end the clip's audio at the press so the sound is not in it.</param>
+    public Task<ClipResult> SaveClipAsync(bool silenceAfterPress = false)
     {
         if (Clips == null) return Task.FromResult(new ClipResult(false, null, "ffmpeg.exe is missing", 0));
-        return Clips.SaveAsync(Settings.Current);
+        return Clips.SaveAsync(Settings.Current, silenceAfterPress);
+    }
+
+    /// <summary>Makes <paramref name="sourceFile"/> the hotkey sound. Call on the UI thread. Returns an error message, or null.</summary>
+    public async Task<string?> SetHotkeySoundAsync(string sourceFile)
+    {
+        if (FfmpegPath == null) return "ffmpeg.exe is missing, so the file cannot be converted.";
+        string ffmpeg = FfmpegPath;
+        string? error = await Task.Run(() => Sounds.Import(ffmpeg, sourceFile, _job));
+        if (error != null) return error;
+        if (!Sounds.UseCustom(true)) return "The converted sound could not be played.";
+        AppSettings s = Settings.Current;
+        s.HotkeySoundName = Path.GetFileName(sourceFile);
+        Settings.Save(s);
+        return null;
+    }
+
+    /// <summary>Goes back to the built-in hotkey chime.</summary>
+    public void ResetHotkeySound()
+    {
+        Sounds.UseCustom(false);
+        AppSettings s = Settings.Current;
+        s.HotkeySoundName = null;
+        Settings.Save(s);
+        try { File.Delete(Sounds.CustomFile); } catch { }
     }
 
     public EngineStatus GetStatus()
@@ -202,19 +228,128 @@ public sealed class Engine : IDisposable
     }
 }
 
-/// <summary>Short confirmation tones, generated in memory so there are no sound files to ship.</summary>
+/// <summary>
+/// The hotkey sound (a built-in chime, or a file the user picked) and the failure tone. The built-in ones are
+/// generated in memory so there are no sound files to ship.
+/// </summary>
 public static class Sounds
 {
-    private static readonly SoundPlayer SavedPlayer = Make([(880, 70), (1320, 110)]);
-    private static readonly SoundPlayer FailedPlayer = Make([(330, 110), (220, 180)]);
+    /// <summary>A picked sound is cut to this length, so a song cannot play over the game for minutes.</summary>
+    public const int MaxCustomSeconds = 5;
 
-    public static void Saved() => Play(SavedPlayer);
+    private static readonly SoundPlayer DefaultHotkeyPlayer = Make([(880, 70), (1320, 110)]);
+    private static readonly SoundPlayer FailedPlayer = Make([(330, 110), (220, 180)]);
+    private static volatile SoundPlayer? _customPlayer;
+
+    /// <summary>The user's hotkey sound, converted to plain WAV so playing it never depends on installed codecs.</summary>
+    public static string CustomFile => Path.Combine(AppPaths.ConfigDir, "hotkey-sound.wav");
+
+    public static void Hotkey()
+    {
+        SoundPlayer? custom = _customPlayer;
+        if (custom == null || !Play(custom)) Play(DefaultHotkeyPlayer);
+    }
+
     public static void Failed() => Play(FailedPlayer);
 
-    private static void Play(SoundPlayer p)
+    /// <summary>Switches between the user's sound in <see cref="CustomFile"/> and the built-in chime. False if the file cannot be played.</summary>
+    public static bool UseCustom(bool custom)
     {
-        try { p.Play(); }
-        catch (Exception ex) { Log.Warn("Sound failed: " + ex.Message); }
+        if (!custom)
+        {
+            _customPlayer = null;
+            return true;
+        }
+        try
+        {
+            // Read into memory: the file stays free to be replaced, and playing never touches the disk.
+            byte[] wav = File.ReadAllBytes(CustomFile);
+            if (!IsPcmWav(wav)) throw new InvalidDataException("not a playable WAV file");
+            var player = new SoundPlayer(new MemoryStream(wav));
+            player.Load();
+            _customPlayer = player;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("The custom hotkey sound could not be loaded, using the built-in one: " + ex.Message);
+            _customPlayer = null;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Converts any file FFmpeg can read (WAV, MP3, OGG, FLAC, M4A, even a video) into <see cref="CustomFile"/>,
+    /// keeping the first <see cref="MaxCustomSeconds"/> seconds. The current sound is only replaced once the new
+    /// one is known to play. Returns an error message for the user, or null on success.
+    /// </summary>
+    public static string? Import(string ffmpeg, string source, JobObject job)
+    {
+        string tmp = CustomFile + ".new.wav";
+        try
+        {
+            var (code, err) = Ffmpeg.Run(ffmpeg,
+                ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", source, "-map", "0:a:0", "-t", MaxCustomSeconds.ToString(),
+                 "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-map_metadata", "-1", "-fflags", "+bitexact", "-f", "wav", tmp],
+                30000, job);
+            if (code != 0)
+            {
+                Log.Warn($"Hotkey sound import failed ({code}): {Ffmpeg.LastLine(err)}");
+                return err.Contains("matches no streams", StringComparison.OrdinalIgnoreCase)
+                    ? "That file has no sound in it."
+                    : "That file could not be read as audio.";
+            }
+            // At least 20 ms of audio after the 44-byte header.
+            if (new FileInfo(tmp).Length < 44 + 48000 * 4 / 50) return "That sound is too short.";
+            if (!IsPcmWav(File.ReadAllBytes(tmp))) return "That file could not be converted to a playable sound.";
+            File.Move(tmp, CustomFile, true);
+            Log.Info($"Hotkey sound set from {source}");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Hotkey sound import failed", ex);
+            return ex.Message;
+        }
+        finally
+        {
+            try { File.Delete(tmp); } catch { }
+        }
+    }
+
+    private static bool Play(SoundPlayer p)
+    {
+        try
+        {
+            p.Play();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Sound failed: " + ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Checks that <paramref name="b"/> is a PCM WAV file with sound in it. SoundPlayer only finds out when it is
+    /// asked to play, and then plays nothing.
+    /// </summary>
+    private static bool IsPcmWav(byte[] b)
+    {
+        if (b.Length < 44 || !b.AsSpan(0, 4).SequenceEqual("RIFF"u8) || !b.AsSpan(8, 4).SequenceEqual("WAVE"u8)) return false;
+        bool pcm = false;
+        long pos = 12;
+        while (pos + 8 <= b.Length)
+        {
+            ReadOnlySpan<byte> id = b.AsSpan((int)pos, 4);
+            long size = BitConverter.ToUInt32(b, (int)pos + 4);
+            if (pos + 8 + size > b.Length) return false;
+            if (id.SequenceEqual("fmt "u8)) pcm = size >= 16 && BitConverter.ToUInt16(b, (int)pos + 8) == 1;
+            else if (id.SequenceEqual("data"u8)) return pcm && size > 0;
+            pos += 8 + size + (size & 1);
+        }
+        return false;
     }
 
     private static SoundPlayer Make((int Hz, int Ms)[] notes)

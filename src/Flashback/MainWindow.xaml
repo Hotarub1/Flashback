@@ -286,7 +286,19 @@
                                 <TextBlock Style="{StaticResource CardTitle}" Text="General"/>
                                 <CheckBox x:Name="StartupCheck" Content="Start with Windows (in the background)" Margin="0,4" Click="Setting_Changed"/>
                                 <CheckBox x:Name="TrayCheck" Content="Keep running in the tray when the window is closed" Margin="0,4" Click="Setting_Changed"/>
-                                <CheckBox x:Name="SoundCheck" Content="Play a sound when a clip is saved" Margin="0,4" Click="Setting_Changed"/>
+                                <CheckBox x:Name="SoundCheck" Content="Play a sound when the clip hotkey is pressed" Margin="0,4" Click="Setting_Changed"/>
+                                <StackPanel Margin="26,2,0,8">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="Sound:" Style="{StaticResource Hint}" FontSize="13" VerticalAlignment="Center"/>
+                                        <TextBlock x:Name="SoundNameText" Foreground="{StaticResource TextPrimary}" FontSize="13" VerticalAlignment="Center"
+                                                   Margin="6,0,0,0" MaxWidth="300" TextTrimming="CharacterEllipsis"/>
+                                        <Button x:Name="ChooseSoundButton" Content="Choose sound…" Margin="14,0,0,0" Click="ChooseSound_Click"/>
+                                        <Button x:Name="PreviewSoundButton" Content="Play" Margin="8,0,0,0" Click="PreviewSound_Click"/>
+                                        <Button x:Name="DefaultSoundButton" Content="Use default" Margin="8,0,0,0" Click="DefaultSound_Click"/>
+                                    </StackPanel>
+                                    <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0"
+                                               Text="Use any audio file (WAV, MP3, OGG, FLAC, M4A…). Only its first 5 seconds are played. Clip audio ends at the moment you press the hotkey, so the sound is not in the clip."/>
+                                </StackPanel>
                                 <CheckBox x:Name="ToastCheck" Content="Show an on-screen notice when a clip is saved" Margin="0,4" Click="Setting_Changed"/>
                                 <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                                     <Button Content="Open log folder" Click="OpenLogs_Click"/>
