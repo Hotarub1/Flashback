@@ -287,12 +287,30 @@ public partial class App : Application
             await Task.Delay(seconds * 1000);
             EngineStatus before = _engine.GetStatus();
             ClipResult r = await _engine.SaveClipAsync();
+
+            // Also exercise the player's reading of the clip and a trimmed copy of it, as "Save trim" would make.
+            ClipInfo? info = null;
+            object? trim = null;
+            if (r.Ok && r.Path != null && _engine.FfmpegPath is { } ffmpeg)
+            {
+                info = await Task.Run(() => ClipAudio.Probe(ffmpeg, r.Path, _engine.Job));
+                if (info != null && info.Seconds > 2.5)
+                {
+                    string output = ClipLibrary.UniquePath(Path.GetDirectoryName(r.Path)!, Path.GetFileNameWithoutExtension(r.Path) + " (trimmed)");
+                    var request = new TrimRequest(r.Path, output, 1.0, info.Seconds - 1.0, 0.5f, 1.5f, info, _settings.Current.Quality);
+                    string? error = await Task.Run(() => ClipEditor.Export(ffmpeg, request, _engine.Job, null));
+                    ClipInfo? trimmed = error == null ? await Task.Run(() => ClipAudio.Probe(ffmpeg, output, _engine.Job)) : null;
+                    trim = new { Ok = error == null, Path = output, Error = error, Info = trimmed };
+                }
+            }
             var report = new
             {
                 r.Ok, r.Path, r.Error, r.Seconds, r.StartUtc,
                 RecorderState = before.State.ToString(), before.Detail, Config = before.Config?.Key, before.Config?.OutputIndex,
                 Desktop = new { before.DesktopStatus, before.DesktopDevice, _engine.Desktop.Ring.TotalPackets, _engine.Desktop.Ring.TotalFrames },
                 Mic = new { before.MicStatus, before.MicDevice, _engine.Mic.Ring.TotalPackets, _engine.Mic.Ring.TotalFrames },
+                Info = info,
+                Trim = trim,
             };
             File.WriteAllText(Path.Combine(AppPaths.LocalDir, "selftest.json"), JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
             code = r.Ok ? 0 : 2;
@@ -313,6 +331,7 @@ public partial class App : Application
         {
             Directory.CreateDirectory(dir);
             _window!.Show();
+            _window.PlayerSilent = true; // a diagnostic run must not play sound through the speakers
             await Task.Delay(2500);
             _window.RenderTo(Path.Combine(dir, "clips.png"));
             if (_window.PlayFirstClip())
@@ -320,6 +339,8 @@ public partial class App : Application
                 await Task.Delay(3000);
                 Log.Info("Player check: " + _window.PlayerDebug());
                 _window.RenderTo(Path.Combine(dir, "player.png"));
+                await Task.Delay(2000);
+                Log.Info("Player check: " + _window.PlayerDebug());
                 _window.ClosePlayerForTest();
             }
             _window.ShowSettingsTab();

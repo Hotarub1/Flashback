@@ -25,7 +25,6 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<ClipItem> _clips = new();
     private readonly SemaphoreSlim _thumbGate = new(3, 3);
     private readonly DispatcherTimer _statusTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
-    private readonly DispatcherTimer _playerTimer = new() { Interval = TimeSpan.FromMilliseconds(100) };
     private readonly DispatcherTimer _reloadTimer = new() { Interval = TimeSpan.FromMilliseconds(400) };
     private FileSystemWatcher? _watcher;
     private string _watchedFolder = "";
@@ -39,9 +38,6 @@ public partial class MainWindow : Window
     private string _hotkeyMessage = "";
     private double _desktopLevel, _micLevel;
 
-    private ClipItem? _playing;
-    private bool _isPlaying, _dragging, _updatingSeek;
-
     public MainWindow(Engine engine, App app)
     {
         _engine = engine;
@@ -52,10 +48,10 @@ public partial class MainWindow : Window
 
         LoadSettingsIntoUi();
         _loading = false;
+        InitPlayer();
 
         _statusTimer.Tick += (_, _) => RefreshStatus();
         _statusTimer.Start();
-        _playerTimer.Tick += (_, _) => RefreshPlayerPosition();
         _reloadTimer.Tick += (_, _) =>
         {
             _reloadTimer.Stop();
@@ -323,173 +319,6 @@ public partial class MainWindow : Window
             box.SelectAll();
         };
         return dialog.ShowDialog() == true ? box.Text.Trim() : null;
-    }
-
-    // ================================================================ player
-
-    private void OpenPlayer(ClipItem item)
-    {
-        if (!File.Exists(item.Path))
-        {
-            QueueReload();
-            return;
-        }
-        ClosePlayer();
-        _playing = item;
-        PlayerTitle.Text = item.Name;
-        PlayerError.Visibility = Visibility.Collapsed;
-        PlayerOverlay.Visibility = Visibility.Visible;
-        _updatingSeek = true;
-        SeekSlider.Maximum = 1;
-        SeekSlider.Value = 0;
-        _updatingSeek = false;
-        PlayerTime.Text = "0:00";
-        PlayerTotal.Text = item.DurationText.Length > 0 ? item.DurationText : "0:00";
-        try
-        {
-            Player.Volume = VolumeSlider.Value;
-            Player.Source = new Uri(item.Path);
-            Player.Play();
-            _isPlaying = true;
-        }
-        catch (Exception ex)
-        {
-            ShowPlayerError(ex.Message);
-        }
-        UpdatePlayGlyph();
-        _playerTimer.Start();
-        PlayPauseButton.Focus();
-    }
-
-    private void ClosePlayer()
-    {
-        _playerTimer.Stop();
-        if (_playing == null && PlayerOverlay.Visibility != Visibility.Visible) return;
-        try
-        {
-            Player.Stop();
-            Player.Close();   // releases the file so it can be renamed or deleted
-            Player.Source = null;
-        }
-        catch { }
-        _playing = null;
-        _isPlaying = false;
-        PlayerOverlay.Visibility = Visibility.Collapsed;
-    }
-
-    private void ShowPlayerError(string message)
-    {
-        PlayerError.Text = "This clip could not be played here.\n" + message + "\nRight-click the clip and choose \"Open in default player\".";
-        PlayerError.Visibility = Visibility.Visible;
-        _isPlaying = false;
-        UpdatePlayGlyph();
-    }
-
-    private void UpdatePlayGlyph() => PlayPauseGlyph.Text = _isPlaying ? "" : "";
-
-    private void TogglePlay()
-    {
-        if (_playing == null) return;
-        if (_isPlaying) Player.Pause();
-        else
-        {
-            if (Player.NaturalDuration.HasTimeSpan && Player.Position >= Player.NaturalDuration.TimeSpan - TimeSpan.FromMilliseconds(50))
-                Player.Position = TimeSpan.Zero;
-            Player.Play();
-        }
-        _isPlaying = !_isPlaying;
-        UpdatePlayGlyph();
-    }
-
-    private void SeekBy(double seconds)
-    {
-        if (_playing == null || !Player.NaturalDuration.HasTimeSpan) return;
-        double total = Player.NaturalDuration.TimeSpan.TotalSeconds;
-        Player.Position = TimeSpan.FromSeconds(Math.Clamp(Player.Position.TotalSeconds + seconds, 0, total));
-    }
-
-    private void RefreshPlayerPosition()
-    {
-        if (_playing == null || _dragging || !Player.NaturalDuration.HasTimeSpan) return;
-        _updatingSeek = true;
-        SeekSlider.Value = Player.Position.TotalSeconds;
-        _updatingSeek = false;
-        PlayerTime.Text = FormatTime(Player.Position.TotalSeconds);
-    }
-
-    private static string FormatTime(double seconds)
-    {
-        var t = TimeSpan.FromSeconds(Math.Max(0, seconds));
-        return t.TotalHours >= 1 ? t.ToString(@"h\:mm\:ss") : t.ToString(@"m\:ss");
-    }
-
-    private void Player_MediaOpened(object sender, RoutedEventArgs e)
-    {
-        if (!Player.NaturalDuration.HasTimeSpan) return;
-        double total = Player.NaturalDuration.TimeSpan.TotalSeconds;
-        _updatingSeek = true;
-        SeekSlider.Maximum = Math.Max(0.1, total);
-        _updatingSeek = false;
-        PlayerTotal.Text = FormatTime(total);
-    }
-
-    private void Player_MediaEnded(object sender, RoutedEventArgs e)
-    {
-        Player.Pause();
-        _isPlaying = false;
-        UpdatePlayGlyph();
-    }
-
-    private void Player_MediaFailed(object? sender, ExceptionRoutedEventArgs e)
-    {
-        Log.Warn("Playback failed: " + e.ErrorException?.Message);
-        ShowPlayerError(e.ErrorException?.Message ?? "");
-    }
-
-    private void PlayPause_Click(object sender, RoutedEventArgs e) => TogglePlay();
-    private void PlayerSurface_Click(object sender, MouseButtonEventArgs e) => TogglePlay();
-    private void PlayerClose_Click(object sender, RoutedEventArgs e) => ClosePlayer();
-
-    private void Seek_DragStarted(object sender, DragStartedEventArgs e) => _dragging = true;
-
-    private void Seek_DragCompleted(object sender, DragCompletedEventArgs e)
-    {
-        _dragging = false;
-        if (_playing != null) Player.Position = TimeSpan.FromSeconds(SeekSlider.Value);
-    }
-
-    private void Seek_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-    {
-        if (_updatingSeek || _playing == null || Player == null) return;
-        Player.Position = TimeSpan.FromSeconds(e.NewValue);
-        PlayerTime.Text = FormatTime(e.NewValue);
-    }
-
-    private void Volume_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-    {
-        if (Player != null) Player.Volume = e.NewValue;
-    }
-
-    private void PlayerShowInFolder_Click(object sender, RoutedEventArgs e)
-    {
-        if (_playing != null) ShowInFolder(_playing.Path);
-    }
-
-    private void PlayerDelete_Click(object sender, RoutedEventArgs e)
-    {
-        if (_playing != null) DeleteClip(_playing);
-    }
-
-    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (_capturingHotkey || PlayerOverlay.Visibility != Visibility.Visible) return;
-        switch (e.Key)
-        {
-            case Key.Escape: ClosePlayer(); e.Handled = true; break;
-            case Key.Space: TogglePlay(); e.Handled = true; break;
-            case Key.Left: SeekBy(-5); e.Handled = true; break;
-            case Key.Right: SeekBy(5); e.Handled = true; break;
-        }
     }
 
     // ================================================================ settings
@@ -862,19 +691,6 @@ public partial class MainWindow : Window
     // ================================================================ diagnostics
 
     public void ShowSettingsTab() => Tabs.SelectedItem = SettingsTab;
-
-    public bool PlayFirstClip()
-    {
-        if (_clips.Count == 0) return false;
-        OpenPlayer(_clips[0]);
-        return true;
-    }
-
-    public string PlayerDebug() =>
-        $"hasDuration={Player.NaturalDuration.HasTimeSpan} duration={(Player.NaturalDuration.HasTimeSpan ? Player.NaturalDuration.TimeSpan.TotalSeconds : 0):F2} " +
-        $"position={Player.Position.TotalSeconds:F2} video={Player.NaturalVideoWidth}x{Player.NaturalVideoHeight} hasAudio={Player.HasAudio} error={PlayerError.Visibility == Visibility.Visible}";
-
-    public void ClosePlayerForTest() => ClosePlayer();
 
     public void RenderTo(string file)
     {

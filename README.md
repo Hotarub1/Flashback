@@ -14,6 +14,25 @@ Created in [T3 Code](https://t3.codes).
 
 To exit, right-click the tray icon and choose **Exit**.
 
+## Watching and editing a clip
+
+Clips carry desktop audio and your microphone as separate tracks (plus a mix of both that other players use). The player lets you work with them:
+
+- **Volume per track.** The sliders under the video set how loud desktop audio and the microphone are while you watch. They go up to 200% so a quiet microphone can be lifted. Clips made before this version have one track and one slider.
+- **Trim.** Drag the handles at the ends of the video bar to choose the part to keep. Playback stops at the end of the kept part. **Save trim** writes a new clip (`<name> (trimmed).mp4`) with that part and the volumes you set, and keeps the original. The new clip has the same three tracks, so it can be trimmed again. Saving is near-instant when the trim starts at the beginning; otherwise the video is re-encoded on the GPU, which takes a few seconds per minute of clip.
+- **Full screen.** The ⛶ button, double-clicking the video or **F**. The controls hide when the mouse rests. **Esc** goes back.
+
+| Key | Action |
+|---|---|
+| Space | Play / pause |
+| ← / → | Back / forward 5 seconds |
+| , / . | One frame back / forward |
+| Home / End | Start / end of the clip |
+| I / O | Set the trim start / end at the playhead |
+| F | Full screen |
+| M | Mute |
+| Esc | Leave full screen, or close the player |
+
 ## Settings
 
 | Setting | What it does | Default |
@@ -38,7 +57,8 @@ To exit, right-click the tray icon and choose **Exit**.
 - **Disk use is bounded.** The buffer holds only the clip length plus 15 seconds, is erased on exit, and recording pauses while the drive is almost full (under about 1.5 GB free).
 - **Nothing is left running.** If the app is closed or crashes, Windows ends the recorder with it.
 - **Audio follows your devices.** Switching headset, speakers or microphone is picked up within a couple of seconds.
-- **A clip is never half-written.** It is written under a temporary name and renamed when complete.
+- **A clip is never half-written.** It is written under a temporary name and renamed when complete. The same goes for trimmed copies.
+- **The separate audio tracks cannot lose a clip.** If writing them fails, the clip is saved with one mixed track, as before.
 - **Hotkey conflicts are visible.** If another program holds the hotkey, Settings says so, and the app keeps trying to claim it.
 
 The status bar at the bottom of the window shows whether recording and both audio sources are working. Details go to the log (Settings, **Open log folder**).
@@ -67,7 +87,9 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 This needs the .NET 10 SDK. It publishes a self-contained app to `dist` and puts FFmpeg next to it, downloading FFmpeg into `tools\ffmpeg` first if it is missing. Always build with this script: running `dotnet publish` twice into the same folder deletes the native DLLs the app needs.
 
-The app is C# and WPF. FFmpeg captures the screen (`ddagrab`) and encodes it on the GPU (`h264_nvenc`) into one-second segments. Audio is captured in the app through WASAPI and laid out against the video by wall-clock time when a clip is saved.
+The app is C# and WPF. FFmpeg captures the screen (`ddagrab`) and encodes it on the GPU (`h264_nvenc`) into one-second segments. Audio is captured in the app through WASAPI and laid out against the video by wall-clock time when a clip is saved. A clip's audio is three AAC tracks: the mix (the default track, what other players and Discord use), desktop audio, and the microphone.
+
+In the player the video goes through WPF's MediaElement with its sound muted, while the two audio tracks are decoded by FFmpeg into memory and played through WASAPI with the chosen volumes, kept within a few milliseconds of the video's clock. Trimmed copies are made by FFmpeg from the clip file itself (the GPU encoder first, then the CPU encoder if that fails).
 
 ### Command-line switches
 
@@ -76,5 +98,5 @@ The app is C# and WPF. FFmpeg captures the screen (`ddagrab`) and encodes it on 
 | `--minimized` | Start in the tray without showing the window |
 | `--quit` | Ask the copy that is already running to exit |
 | `--data-dir <folder>` | Keep settings, buffer and logs in `<folder>` and skip the single-instance check (for testing) |
-| `--selftest <seconds>` | Record for that long, save one clip, write `selftest.json` to the data folder, exit |
-| `--render-ui <folder>` | Save PNG images of the pages to `<folder>`, then exit |
+| `--selftest <seconds>` | Record for that long, save one clip, save a trimmed copy of it, write `selftest.json` to the data folder, exit |
+| `--render-ui <folder>` | Save PNG images of the pages (including the player, muted) to `<folder>`, log the player's audio/video sync, then exit |

@@ -84,13 +84,22 @@ public static partial class ClipLibrary
         }
     }
 
-    /// <summary>Removes half-written clips left behind if the app was killed mid-save.</summary>
+    /// <summary>A free file name in <paramref name="folder"/> for <paramref name="name"/>.mp4, numbered if that is taken.</summary>
+    public static string UniquePath(string folder, string name)
+    {
+        string path = Path.Combine(folder, name + ".mp4");
+        for (int i = 2; File.Exists(path) || File.Exists(path + ".part"); i++)
+            path = Path.Combine(folder, $"{name} ({i}).mp4");
+        return path;
+    }
+
+    /// <summary>Removes half-written clips (saves or trims) left behind if the app was killed mid-write.</summary>
     public static void RemoveStaleParts(string folder)
     {
         try
         {
             if (!Directory.Exists(folder)) return;
-            foreach (string f in Directory.GetFiles(folder, "Clip *.mp4.part"))
+            foreach (string f in Directory.GetFiles(folder, "*.mp4.part"))
             {
                 if (DateTime.UtcNow - File.GetLastWriteTimeUtc(f) > TimeSpan.FromMinutes(10)) File.Delete(f);
             }

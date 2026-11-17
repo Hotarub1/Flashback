@@ -1,6 +1,7 @@
 <Window x:Class="Flashback.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:Flashback"
         Title="Flashback" Width="1140" Height="740" MinWidth="860" MinHeight="560"
         WindowStartupLocation="CenterScreen" Icon="/Assets/icon.ico"
         PreviewKeyDown="Window_PreviewKeyDown">
@@ -324,46 +325,129 @@
         </Border>
 
         <!-- Player overlay -->
-        <Grid x:Name="PlayerOverlay" Grid.RowSpan="3" Background="#FF0B0B0D" Visibility="Collapsed">
+        <Grid x:Name="PlayerOverlay" Grid.RowSpan="3" Background="#FF0B0B0D" Visibility="Collapsed" MouseMove="PlayerOverlay_MouseMove">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
-            <DockPanel Margin="20,14,20,10">
+
+            <DockPanel x:Name="PlayerHeader" Margin="20,14,20,8">
                 <Button DockPanel.Dock="Right" Click="PlayerClose_Click" ToolTip="Close (Esc)">
                     <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE8BB;" FontSize="12"/>
                 </Button>
+                <Button DockPanel.Dock="Right" Content="Delete" Margin="0,0,8,0" Click="PlayerDelete_Click"/>
+                <Button DockPanel.Dock="Right" Content="Show in folder" Margin="0,0,8,0" Click="PlayerShowInFolder_Click"/>
                 <TextBlock x:Name="PlayerTitle" Foreground="{StaticResource TextPrimary}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
             </DockPanel>
-            <Grid Grid.Row="1" Background="Black" MouseLeftButtonUp="PlayerSurface_Click">
+
+            <Grid x:Name="PlayerSurface" Grid.Row="1" Background="Black" MouseLeftButtonDown="PlayerSurface_MouseDown">
                 <MediaElement x:Name="Player" LoadedBehavior="Manual" UnloadedBehavior="Manual" Stretch="Uniform" ScrubbingEnabled="True"
                               MediaOpened="Player_MediaOpened" MediaEnded="Player_MediaEnded" MediaFailed="Player_MediaFailed"/>
                 <TextBlock x:Name="PlayerError" Foreground="{StaticResource TextMuted}" HorizontalAlignment="Center" VerticalAlignment="Center"
                            TextAlignment="Center" Visibility="Collapsed"/>
             </Grid>
-            <Grid Grid.Row="2" Margin="20,12,20,16">
+
+            <!-- Transport bar. In full screen it floats over the bottom of the video and hides when the mouse rests. -->
+            <Border x:Name="ControlBar" Grid.Row="2" Padding="20,10,20,8" Background="#FF0B0B0D">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Orientation="Horizontal">
+                        <Button Width="36" Height="32" Padding="0" Click="ToStart_Click" ToolTip="Start (Home)">
+                            <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE892;" FontSize="13"/>
+                        </Button>
+                        <Button Width="36" Height="32" Padding="0" Margin="4,0,0,0" Click="FrameBack_Click" ToolTip="One frame back (comma)">
+                            <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE76B;" FontSize="13"/>
+                        </Button>
+                        <Button x:Name="PlayPauseButton" Width="44" Height="32" Padding="0" Margin="4,0,0,0" Click="PlayPause_Click" ToolTip="Play / pause (Space)">
+                            <TextBlock x:Name="PlayPauseGlyph" FontFamily="{StaticResource Icons}" Text="&#xE769;" FontSize="14"/>
+                        </Button>
+                        <Button Width="36" Height="32" Padding="0" Margin="4,0,0,0" Click="FrameForward_Click" ToolTip="One frame forward (period)">
+                            <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE76C;" FontSize="13"/>
+                        </Button>
+                        <Button Width="36" Height="32" Padding="0" Margin="4,0,0,0" Click="ToEnd_Click" ToolTip="End (End)">
+                            <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE893;" FontSize="13"/>
+                        </Button>
+                    </StackPanel>
+                    <TextBlock x:Name="PlayerTime" Grid.Column="1" Foreground="{StaticResource TextPrimary}" FontSize="12" VerticalAlignment="Center" Margin="14,0,10,0" Text="0:00"/>
+                    <Slider x:Name="SeekSlider" Grid.Column="2" Minimum="0" Maximum="1" VerticalAlignment="Center" IsMoveToPointEnabled="True"
+                            Thumb.DragStarted="Seek_DragStarted" Thumb.DragCompleted="Seek_DragCompleted" ValueChanged="Seek_ValueChanged"/>
+                    <TextBlock x:Name="PlayerTotal" Grid.Column="3" Foreground="{StaticResource TextMuted}" FontSize="12" VerticalAlignment="Center" Margin="10,0,14,0" Text="0:00"/>
+                    <StackPanel Grid.Column="4" Orientation="Horizontal">
+                        <Button x:Name="MuteButton" Width="36" Height="32" Padding="0" Click="Mute_Click" ToolTip="Mute (M)">
+                            <TextBlock x:Name="MuteGlyph" FontFamily="{StaticResource Icons}" Text="&#xE767;" FontSize="13"/>
+                        </Button>
+                        <Button x:Name="FullscreenButton" Width="36" Height="32" Padding="0" Margin="4,0,0,0" Click="Fullscreen_Click" ToolTip="Full screen (F)">
+                            <TextBlock x:Name="FullscreenGlyph" FontFamily="{StaticResource Icons}" Text="&#xE740;" FontSize="13"/>
+                        </Button>
+                    </StackPanel>
+                    <StackPanel x:Name="TrimPanel" Grid.Column="5" Orientation="Horizontal" Margin="16,0,0,0">
+                        <ProgressBar x:Name="ExportProgress" Width="110" Height="6" Minimum="0" Maximum="1" VerticalAlignment="Center" Margin="0,0,12,0" Visibility="Collapsed"/>
+                        <Button x:Name="SaveTrimButton" Style="{StaticResource PrimaryButton}" Padding="14,6" Click="SaveTrim_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE8C6;" VerticalAlignment="Center" Margin="0,1,8,0"/>
+                                <TextBlock Text="Save trim"/>
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Timeline: volume per track on the left, the ruler, video bar and waveforms on the right. Row heights match the control. -->
+            <Grid x:Name="TimelinePanel" Grid.Row="3" Margin="20,2,20,14">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="220"/>
                     <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="110"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <Button x:Name="PlayPauseButton" Width="40" Height="34" Padding="0" Click="PlayPause_Click" ToolTip="Play / pause (Space)">
-                    <TextBlock x:Name="PlayPauseGlyph" FontFamily="{StaticResource Icons}" Text="&#xE769;" FontSize="14"/>
-                </Button>
-                <TextBlock x:Name="PlayerTime" Grid.Column="1" Foreground="{StaticResource TextPrimary}" FontSize="12" VerticalAlignment="Center" Margin="12,0,10,0" Text="0:00"/>
-                <Slider x:Name="SeekSlider" Grid.Column="2" Minimum="0" Maximum="1" VerticalAlignment="Center" IsMoveToPointEnabled="True"
-                        Thumb.DragStarted="Seek_DragStarted" Thumb.DragCompleted="Seek_DragCompleted" ValueChanged="Seek_ValueChanged"/>
-                <TextBlock x:Name="PlayerTotal" Grid.Column="3" Foreground="{StaticResource TextMuted}" FontSize="12" VerticalAlignment="Center" Margin="10,0,16,0" Text="0:00"/>
-                <TextBlock Grid.Column="4" FontFamily="{StaticResource Icons}" Text="&#xE767;" Foreground="{StaticResource TextMuted}" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <Slider x:Name="VolumeSlider" Grid.Column="5" Minimum="0" Maximum="1" Value="0.8" VerticalAlignment="Center" ValueChanged="Volume_ValueChanged"/>
-                <Button Grid.Column="6" Content="Show in folder" Margin="16,0,0,0" Click="PlayerShowInFolder_Click"/>
-                <Button Grid.Column="7" Content="Delete" Margin="8,0,0,0" Click="PlayerDelete_Click"/>
+                <StackPanel Margin="0,0,10,0">
+                    <Grid Height="{x:Static local:TimelineControl.RulerHeight}">
+                        <TextBlock x:Name="TrimInfo" Foreground="{StaticResource TextMuted}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                    </Grid>
+                    <Border Height="{x:Static local:TimelineControl.VideoHeight}" Margin="0,4,0,0" Background="#222229" CornerRadius="4" Padding="10,0">
+                        <TextBlock Text="Video" Foreground="{StaticResource TextPrimary}" FontSize="12" VerticalAlignment="Center"/>
+                    </Border>
+                    <Border x:Name="TrackARow" Height="{x:Static local:TimelineControl.TrackHeight}" Margin="0,4,0,0" Background="{StaticResource CardBackground}" CornerRadius="4" Padding="10,3,10,0">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <DockPanel>
+                                <TextBlock x:Name="TrackAPercent" DockPanel.Dock="Right" Foreground="{StaticResource TextMuted}" FontSize="11" Text="100%"/>
+                                <TextBlock x:Name="TrackALabel" Foreground="#2DD4BF" FontSize="12" Text="Audio" TextTrimming="CharacterEllipsis"/>
+                            </DockPanel>
+                            <Slider x:Name="TrackASlider" Grid.Row="1" Minimum="0" Maximum="200" Value="100" SmallChange="5" LargeChange="25"
+                                    VerticalAlignment="Center" Margin="0,-4,0,0" ValueChanged="TrackVolume_Changed" ToolTip="Volume of this track while watching and in a saved trim"/>
+                        </Grid>
+                    </Border>
+                    <Border x:Name="TrackBRow" Height="{x:Static local:TimelineControl.TrackHeight}" Margin="0,4,0,0" Background="{StaticResource CardBackground}" CornerRadius="4" Padding="10,3,10,0" Visibility="Collapsed">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <DockPanel>
+                                <TextBlock x:Name="TrackBPercent" DockPanel.Dock="Right" Foreground="{StaticResource TextMuted}" FontSize="11" Text="100%"/>
+                                <TextBlock x:Name="TrackBLabel" Foreground="#F59E0B" FontSize="12" Text="Microphone" TextTrimming="CharacterEllipsis"/>
+                            </DockPanel>
+                            <Slider x:Name="TrackBSlider" Grid.Row="1" Minimum="0" Maximum="200" Value="100" SmallChange="5" LargeChange="25"
+                                    VerticalAlignment="Center" Margin="0,-4,0,0" ValueChanged="TrackVolume_Changed" ToolTip="Volume of this track while watching and in a saved trim"/>
+                        </Grid>
+                    </Border>
+                </StackPanel>
+                <local:TimelineControl x:Name="Timeline" Grid.Column="1" VerticalAlignment="Top" Focusable="True"/>
+                <Border x:Name="AudioNote" Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,0,4,0" Padding="8,2" CornerRadius="4"
+                        Background="#CC1A1A1F" Visibility="Collapsed">
+                    <TextBlock x:Name="AudioNoteText" Foreground="{StaticResource Warn}" FontSize="11"/>
+                </Border>
             </Grid>
         </Grid>
     </Grid>
