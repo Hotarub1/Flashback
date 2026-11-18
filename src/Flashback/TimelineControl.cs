@@ -12,13 +12,16 @@ public sealed record TimelineTrack(string Name, Color Color, float[] Peaks);
 /// <summary>
 /// The editing strip under the video: a time ruler, the video bar with the trim handles, and a waveform per audio
 /// track. Clicking or dragging on the ruler or a waveform moves the playhead; dragging a handle on the video bar
-/// changes the trimmed range.
+/// changes the trimmed range. The ruler and the waveforms are drawn once per size and reused, so moving the playhead
+/// (many times a second while scrubbing) only redraws the cheap parts.
 /// </summary>
 public sealed class TimelineControl : FrameworkElement
 {
     public const double RulerHeight = 24;
     public const double VideoHeight = 34;
     public const double TrackHeight = 52;
+    /// <summary>Row height once there are more tracks than fit comfortably at <see cref="TrackHeight"/>.</summary>
+    public const double CompactTrackHeight = 42;
     public const double RowGap = 4;
     private const double HandleWidth = 8;
     private const double MinTrimSeconds = 0.5;
@@ -47,6 +50,10 @@ public sealed class TimelineControl : FrameworkElement
 
     private readonly List<TimelineTrack> _tracks = new();
     private readonly Dictionary<TimelineTrack, (Brush Bright, Brush Dim)> _brushes = new();
+    private readonly List<StreamGeometry> _waves = new();
+    private double _wavesWidth = -1;
+    private DrawingGroup? _ruler;
+    private (double Width, double Duration) _rulerKey;
     private enum Drag { None, Playhead, Start, End }
     private Drag _drag;
 
@@ -69,10 +76,17 @@ public sealed class TimelineControl : FrameworkElement
 
     public bool IsTrimmed => Duration > 0 && (TrimStart > 0.01 || TrimEnd < Duration - 0.01);
 
+    /// <summary>Height of each audio row for this many tracks; the volume rows beside the timeline use the same.</summary>
+    public static double TrackHeightFor(int tracks) => tracks > 3 ? CompactTrackHeight : TrackHeight;
+
+    public double RowHeight => TrackHeightFor(_tracks.Count);
+
     public void SetTracks(IEnumerable<TimelineTrack> tracks)
     {
         _tracks.Clear();
         _brushes.Clear();
+        _waves.Clear();
+        _wavesWidth = -1;
         _tracks.AddRange(tracks);
         foreach (TimelineTrack t in _tracks)
         {
@@ -87,7 +101,7 @@ public sealed class TimelineControl : FrameworkElement
 
     protected override Size MeasureOverride(Size availableSize)
     {
-        double height = RulerHeight + RowGap + VideoHeight + TrackRows * (RowGap + TrackHeight);
+        double height = RulerHeight + RowGap + VideoHeight + TrackRows * (RowGap + RowHeight);
         return new Size(double.IsInfinity(availableSize.Width) ? 400 : availableSize.Width, height);
     }
 
@@ -97,17 +111,24 @@ public sealed class TimelineControl : FrameworkElement
     {
         double w = ActualWidth, h = ActualHeight;
         dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, w, h));
-        double videoTop = RulerHeight + RowGap;
+        double videoTop = RulerHeight + RowGap, rowHeight = RowHeight;
         dc.DrawRoundedRectangle(VideoBrush, null, new Rect(0, videoTop, w, VideoHeight), 4, 4);
         for (int i = 0; i < TrackRows; i++)
-            dc.DrawRoundedRectangle(RowBrush, null, new Rect(0, TrackTop(i), w, TrackHeight), 4, 4);
+            dc.DrawRoundedRectangle(RowBrush, null, new Rect(0, TrackTop(i), w, rowHeight), 4, 4);
         if (Duration <= 0 || w < 10) return;
 
         double px = w / Duration;
         double start = Math.Clamp(TrimStart, 0, Duration), end = Math.Clamp(TrimEnd, 0, Duration);
         double xs = start * px, xe = end * px;
 
-        DrawRuler(dc, w, px);
+        if (_ruler == null || _rulerKey != (w, Duration))
+        {
+            _ruler = new DrawingGroup();
+            using (DrawingContext rc = _ruler.Open()) DrawRuler(rc, w, px);
+            _ruler.Freeze();
+            _rulerKey = (w, Duration);
+        }
+        dc.DrawDrawing(_ruler);
 
         // Video bar: hatched outside the kept range, bracket handles at its ends.
         if (xs > 0) dc.DrawRectangle(HatchBrush, null, new Rect(0, videoTop, xs, VideoHeight));
@@ -117,6 +138,12 @@ public sealed class TimelineControl : FrameworkElement
         DrawHandle(dc, xe, videoTop, false);
 
         // Waveforms, dimmed outside the kept range. A track without peaks yet is still being decoded.
+        if (_wavesWidth != w)
+        {
+            _waves.Clear();
+            for (int i = 0; i < _tracks.Count; i++) _waves.Add(WaveShape(_tracks[i].Peaks, w, TrackTop(i), rowHeight));
+            _wavesWidth = w;
+        }
         bool loading = _tracks.Count == 0;
         for (int i = 0; i < _tracks.Count; i++)
         {
@@ -126,17 +153,17 @@ public sealed class TimelineControl : FrameworkElement
                 loading = true;
                 continue;
             }
-            StreamGeometry shape = WaveShape(t.Peaks, w, TrackTop(i), TrackHeight);
+            StreamGeometry shape = _waves[i];
             var (bright, dim) = _brushes[t];
             dc.DrawGeometry(dim, null, shape);
-            dc.PushClip(new RectangleGeometry(new Rect(xs, TrackTop(i), Math.Max(0, xe - xs), TrackHeight)));
+            dc.PushClip(new RectangleGeometry(new Rect(xs, TrackTop(i), Math.Max(0, xe - xs), rowHeight)));
             dc.DrawGeometry(bright, null, shape);
             dc.Pop();
         }
         if (loading)
         {
             var text = Text("Loading audio…", 12, RulerText);
-            dc.DrawText(text, new Point(10, TrackTop(0) + (TrackHeight - text.Height) / 2));
+            dc.DrawText(text, new Point(10, TrackTop(0) + (rowHeight - text.Height) / 2));
         }
 
         // Kept range shading across the audio rows, then the playhead over everything.
@@ -185,6 +212,7 @@ public sealed class TimelineControl : FrameworkElement
 
     private static StreamGeometry WaveShape(float[] peaks, double w, double top, double height)
     {
+        if (peaks.Length == 0) return new StreamGeometry();
         int columns = Math.Max(1, (int)w);
         var upper = new double[columns];
         double mid = top + height / 2, half = height / 2 - 2;
@@ -212,7 +240,7 @@ public sealed class TimelineControl : FrameworkElement
         return geometry;
     }
 
-    private static double TrackTop(int index) => RulerHeight + RowGap + VideoHeight + RowGap + index * (TrackHeight + RowGap);
+    private double TrackTop(int index) => RulerHeight + RowGap + VideoHeight + RowGap + index * (RowHeight + RowGap);
 
     private FormattedText Text(string s, double size, Brush brush) =>
         new(s, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight, Font, size, brush, VisualTreeHelper.GetDpi(this).PixelsPerDip);

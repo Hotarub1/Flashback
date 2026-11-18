@@ -3,9 +3,12 @@ using System.IO;
 
 namespace Flashback.Core;
 
-/// <summary>A trimmed copy of a clip to write: the part to keep and how loud each audio track should be in it.</summary>
+/// <summary>
+/// A trimmed copy of a clip to write: the part to keep and how loud each audio track should be in it (one volume per
+/// stream in <see cref="ClipInfo.StemStreams"/>).
+/// </summary>
 public sealed record TrimRequest(
-    string Source, string Output, double Start, double End, float FirstGain, float SecondGain, ClipInfo Info, string Quality);
+    string Source, string Output, double Start, double End, IReadOnlyList<float> Gains, ClipInfo Info, string Quality);
 
 /// <summary>
 /// Writes trimmed copies of clips. The video is copied untouched when the trim starts at the beginning, otherwise it
@@ -68,7 +71,7 @@ public static class ClipEditor
                 if (code == 0 && File.Exists(part) && new FileInfo(part).Length >= 1024)
                 {
                     File.Move(part, r.Output);
-                    Log.Info($"Trim saved: {r.Output} ({r.Start:F2}s to {r.End:F2}s, volumes {r.FirstGain:F2}/{r.SecondGain:F2}, video {name})");
+                    Log.Info($"Trim saved: {r.Output} ({r.Start:F2}s to {r.End:F2}s, volumes {string.Join("/", r.Gains.Select(g => g.ToString("F2", CultureInfo.InvariantCulture)))}, video {name})");
                     return null;
                 }
                 Log.Warn($"Trim with {name} video failed ({code}): {Ffmpeg.LastLine(err)}");
@@ -99,19 +102,32 @@ public static class ClipEditor
         if (cutEnd) args.AddRange(["-t", F(duration)]);
 
         args.AddRange(["-map", "0:v:0"]);
-        if (r.Info.HasStems)
+        IReadOnlyList<int> stems = r.Info.StemStreams;
+        float Gain(int i) => i < r.Gains.Count ? r.Gains[i] : 1f;
+        string Title(int stream) => r.Info.AudioTitles[stream].Length > 0 ? r.Info.AudioTitles[stream] : "Audio";
+        bool unchanged = Enumerable.Range(0, stems.Count).All(i => Math.Abs(Gain(i) - 1f) < 0.001f);
+        if (r.Info.HasStems && unchanged)
+        {
+            // Volumes untouched: keep the clip's own mix, which also has any sound no separate track caught.
+            args.AddRange(["-map", "0:a:0"]);
+            foreach (int stream in stems) args.AddRange(["-map", $"0:a:{stream}"]);
+            ClipAudio.AddCodec(args, [ClipAudio.MixTitle, .. stems.Select(Title)]);
+        }
+        else if (r.Info.HasStems)
         {
             // Volume per track, the mix as the sum (clamped to 16-bit range like the recorder does), the tracks again on their own.
-            args.AddRange(["-filter_complex",
-                $"[0:a:1]volume={F(r.FirstGain)},aformat=sample_fmts=s16,asplit[a1][a2];" +
-                $"[0:a:2]volume={F(r.SecondGain)},aformat=sample_fmts=s16,asplit[b1][b2];" +
-                "[a1][b1]amix=inputs=2:normalize=0,aformat=sample_fmts=s16[mix]",
-                "-map", "[mix]", "-map", "[a2]", "-map", "[b2]"]);
-            ClipAudio.AddCodec(args, [ClipAudio.MixTitle, ClipAudio.DesktopTitle, ClipAudio.MicTitle]);
+            var graph = new System.Text.StringBuilder();
+            for (int i = 0; i < stems.Count; i++)
+                graph.Append($"[0:a:{stems[i]}]volume={F(Gain(i))},aformat=sample_fmts=s16,asplit[m{i}][t{i}];");
+            for (int i = 0; i < stems.Count; i++) graph.Append($"[m{i}]");
+            graph.Append($"amix=inputs={stems.Count}:normalize=0,aformat=sample_fmts=s16[mix]");
+            args.AddRange(["-filter_complex", graph.ToString(), "-map", "[mix]"]);
+            for (int i = 0; i < stems.Count; i++) args.AddRange(["-map", $"[t{i}]"]);
+            ClipAudio.AddCodec(args, [ClipAudio.MixTitle, .. stems.Select(Title)]);
         }
         else if (r.Info.AudioStreams > 0)
         {
-            args.AddRange(["-filter_complex", $"[0:a:0]volume={F(r.FirstGain)},aformat=sample_fmts=s16[mix]", "-map", "[mix]"]);
+            args.AddRange(["-filter_complex", $"[0:a:0]volume={F(Gain(0))},aformat=sample_fmts=s16[mix]", "-map", "[mix]"]);
             ClipAudio.AddCodec(args, [r.Info.AudioTitles[0].Length > 0 ? r.Info.AudioTitles[0] : ClipAudio.MixTitle]);
         }
         args.AddRange(videoOptions);

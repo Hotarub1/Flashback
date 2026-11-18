@@ -6,7 +6,7 @@ namespace Flashback.Core;
 
 /// <summary>
 /// Plays a clip's decoded audio tracks through the default output, each at its own volume, so the player can
-/// rebalance desktop audio and the microphone while the video plays. The video player drives the clock: the window
+/// rebalance the apps and the microphone while the video plays. The video player drives the clock: the window
 /// compares <see cref="HeardSeconds"/> with the video position every few milliseconds and calls <see cref="Seek"/>
 /// when they drift apart. The output stream runs all the time and plays silence while paused, so pausing, seeking
 /// and resuming never wait on the sound card.
@@ -63,10 +63,19 @@ public sealed class StemPlayer : IDisposable
         set => _provider.Muted = value;
     }
 
-    public void SetGains(float first, float second)
+    /// <summary>The player's overall volume (0 to 1), applied after the tracks are mixed. Only for listening; trims ignore it.</summary>
+    public float Volume
     {
-        _provider.FirstGain = first;
-        _provider.SecondGain = second;
+        get => _provider.Volume;
+        set => _provider.Volume = Math.Clamp(value, 0f, 1f);
+    }
+
+    /// <summary>One volume per track, in track order (1 = as recorded).</summary>
+    public void SetGains(IReadOnlyList<float> gains)
+    {
+        var copy = new float[_provider.TrackCount];
+        for (int i = 0; i < copy.Length; i++) copy[i] = i < gains.Count ? gains[i] : 1f;
+        _provider.Gains = copy;
     }
 
     public void Seek(double seconds) => _provider.Seek((long)Math.Round(seconds * ClipAudio.SampleRate));
@@ -92,16 +101,18 @@ public sealed class StemPlayer : IDisposable
 
     private sealed class Provider(ClipStems stems) : IWaveProvider
     {
-        private readonly short[] _first = stems.First;
-        private readonly short[]? _second = stems.Second;
+        private readonly short[][] _tracks = stems.Tracks.Select(t => t.Pcm).ToArray();
         private readonly long _frames = stems.Frames;
         private readonly object _lock = new();
         private long _pos, _anchor;
 
         public volatile bool Playing;
         public volatile bool Muted;
-        public volatile float FirstGain = 1f;
-        public volatile float SecondGain = 1f;
+        public volatile float Volume = 1f;
+        /// <summary>Replaced as a whole, never changed in place, so the audio thread always sees one consistent set.</summary>
+        public volatile float[] Gains = Enumerable.Repeat(1f, stems.Tracks.Count).ToArray();
+
+        public int TrackCount => _tracks.Length;
 
         public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(ClipAudio.SampleRate, 2);
 
@@ -130,14 +141,14 @@ public sealed class StemPlayer : IDisposable
                 pos = _pos;
                 if (playing) _pos += frames;
             }
-            if (!playing || Muted)
+            float master = Volume / 32768f;
+            if (!playing || Muted || master == 0f)
             {
                 output.Clear();
                 return frames * 8;
             }
-            float ga = FirstGain, gb = SecondGain;
-            short[] a = _first;
-            short[]? b = _second;
+            float[] gains = Gains;
+            short[][] tracks = _tracks;
             for (int i = 0; i < frames; i++)
             {
                 long f = pos + i;
@@ -147,14 +158,16 @@ public sealed class StemPlayer : IDisposable
                     continue;
                 }
                 long s = f * 2;
-                float l = a[s] * ga, r = a[s + 1] * ga;
-                if (b != null)
+                float l = 0, r = 0;
+                for (int t = 0; t < tracks.Length; t++)
                 {
-                    l += b[s] * gb;
-                    r += b[s + 1] * gb;
+                    float g = gains[t];
+                    if (g == 0f) continue;
+                    l += tracks[t][s] * g;
+                    r += tracks[t][s + 1] * g;
                 }
-                output[i * 2] = Math.Clamp(l / 32768f, -1f, 1f);
-                output[i * 2 + 1] = Math.Clamp(r / 32768f, -1f, 1f);
+                output[i * 2] = Math.Clamp(l * master, -1f, 1f);
+                output[i * 2 + 1] = Math.Clamp(r * master, -1f, 1f);
             }
             return frames * 8;
         }

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Flashback.Core;
@@ -11,47 +12,65 @@ public sealed record ClipInfo(double Seconds, int Width, int Height, double Fps,
     public int AudioStreams => AudioTitles.Count;
 
     /// <summary>
-    /// True when the clip carries desktop audio and the microphone as separate tracks (streams 1 and 2) behind the
-    /// mix in stream 0, which is how Flashback saves clips that have both.
+    /// True when the clip carries separate tracks (desktop audio or each app, and the microphone) behind the mix in
+    /// stream 0, which is how Flashback saves clips with more than one source.
     /// </summary>
-    public bool HasStems => AudioStreams >= 3;
+    public bool HasStems => AudioStreams >= 3 || (AudioStreams == 2 && AudioTitles[0] == ClipAudio.MixTitle);
+
+    /// <summary>The audio streams the player and the trim editor work with: the separate tracks, or the one track.</summary>
+    public IReadOnlyList<int> StemStreams => HasStems ? Enumerable.Range(1, AudioStreams - 1).ToList() : AudioStreams > 0 ? [0] : [];
 }
 
-/// <summary>Up to two 48 kHz stereo 16-bit audio tracks of equal length: the desktop and the microphone, or one track alone.</summary>
+/// <summary>One audio track of a clip: 48 kHz stereo 16-bit samples and the title stored with it.</summary>
+public sealed record ClipTrack(string Title, short[] Pcm);
+
+/// <summary>
+/// Audio tracks of equal length for a clip, and what goes into its mix. With one track that track is the clip's only
+/// audio. With several, the clip gets the mix first (what every player plays) and then each track on its own.
+/// </summary>
 public sealed class ClipStems
 {
-    public ClipStems(short[] first, short[]? second)
+    private readonly IReadOnlyList<short[]> _mixParts;
+
+    /// <param name="mixParts">What the mix is the sum of. By default the tracks themselves; separate app tracks pass
+    /// the full desktop capture instead, so sounds no app track caught stay in the mix.</param>
+    public ClipStems(IReadOnlyList<ClipTrack> tracks, IReadOnlyList<short[]>? mixParts = null)
     {
-        if (second != null && second.Length != first.Length) throw new ArgumentException("Stems must have the same length");
-        First = first;
-        Second = second;
+        if (tracks.Count == 0) throw new ArgumentException("A clip needs at least one audio track");
+        int length = tracks[0].Pcm.Length;
+        if (tracks.Any(t => t.Pcm.Length != length) || mixParts?.Any(m => m.Length != length) == true)
+            throw new ArgumentException("Audio tracks must have the same length");
+        if (tracks.Count == 1 && mixParts != null) throw new ArgumentException("A single track is its own mix");
+        Tracks = tracks;
+        _mixParts = mixParts ?? tracks.Select(t => t.Pcm).ToList();
     }
 
-    public short[] First { get; }
-    public short[]? Second { get; }
-    public bool Both => Second != null;
-    public long Frames => First.Length / 2;
+    public IReadOnlyList<ClipTrack> Tracks { get; }
+    public bool Separate => Tracks.Count > 1;
+    public long Frames => Tracks[0].Pcm.Length / 2;
     public double Seconds => Frames / (double)ClipAudio.SampleRate;
 
-    /// <summary>Channels on the pipe to FFmpeg: mix, first, second (six) or the one track (two).</summary>
-    public int PipeChannels => Both ? 6 : 2;
+    /// <summary>Channels on the pipe to FFmpeg: the mix and then each track (two each), or the one track.</summary>
+    public int PipeChannels => Separate ? 2 * (Tracks.Count + 1) : 2;
 
     /// <summary>
-    /// Writes the audio as interleaved 16-bit samples for FFmpeg. With two stems every frame carries the mix
-    /// (the sum, clamped like the recorder always mixed it) followed by each stem on its own.
+    /// Writes the audio as interleaved 16-bit samples for FFmpeg. With several tracks every frame carries the mix
+    /// (the sum, clamped like the recorder always mixed it) followed by each track on its own.
     /// </summary>
     public void WriteTo(Stream stdin)
     {
-        if (!Both)
+        if (!Separate)
         {
-            ReadOnlySpan<byte> bytes = MemoryMarshal.AsBytes(First.AsSpan());
+            ReadOnlySpan<byte> bytes = MemoryMarshal.AsBytes(Tracks[0].Pcm.AsSpan());
             for (int i = 0; i < bytes.Length; i += 1 << 16)
                 stdin.Write(bytes.Slice(i, Math.Min(1 << 16, bytes.Length - i)));
             return;
         }
         const int chunkFrames = 4096;
-        var chunk = new short[chunkFrames * 6];
-        short[] a = First, b = Second!;
+        int channels = PipeChannels;
+        var chunk = new short[chunkFrames * channels];
+        short[][] mix = _mixParts.ToArray();
+        short[][] tracks = Tracks.Select(t => t.Pcm).ToArray();
         long frames = Frames;
         for (long f = 0; f < frames; f += chunkFrames)
         {
@@ -59,23 +78,30 @@ public sealed class ClipStems
             for (int i = 0; i < n; i++)
             {
                 long s = (f + i) * 2;
-                int o = i * 6;
-                chunk[o] = (short)Math.Clamp(a[s] + b[s], short.MinValue, short.MaxValue);
-                chunk[o + 1] = (short)Math.Clamp(a[s + 1] + b[s + 1], short.MinValue, short.MaxValue);
-                chunk[o + 2] = a[s];
-                chunk[o + 3] = a[s + 1];
-                chunk[o + 4] = b[s];
-                chunk[o + 5] = b[s + 1];
+                int o = i * channels;
+                int l = 0, r = 0;
+                foreach (short[] m in mix)
+                {
+                    l += m[s];
+                    r += m[s + 1];
+                }
+                chunk[o] = (short)Math.Clamp(l, short.MinValue, short.MaxValue);
+                chunk[o + 1] = (short)Math.Clamp(r, short.MinValue, short.MaxValue);
+                for (int t = 0; t < tracks.Length; t++)
+                {
+                    chunk[o + 2 + t * 2] = tracks[t][s];
+                    chunk[o + 3 + t * 2] = tracks[t][s + 1];
+                }
             }
-            stdin.Write(MemoryMarshal.AsBytes(chunk.AsSpan(0, n * 6)));
+            stdin.Write(MemoryMarshal.AsBytes(chunk.AsSpan(0, n * channels)));
         }
     }
 }
 
 /// <summary>
-/// How audio is laid out in a clip, and how to read it back. A clip with both desktop audio and the microphone
-/// carries three AAC tracks: the mix that every player uses by default, then the desktop and the microphone on their
-/// own so the player can rebalance them afterwards. A clip with one source carries that one track only.
+/// How audio is laid out in a clip, and how to read it back. A clip with more than one source carries the mix that
+/// every player uses by default, then each source on its own (desktop audio or one track per app, then the
+/// microphone) so the player can rebalance them afterwards. A clip with one source carries that one track only.
 /// </summary>
 public static partial class ClipAudio
 {
@@ -115,26 +141,29 @@ public static partial class ClipAudio
     /// Maps and encodes the audio from <see cref="AddPipeInput"/> (input <paramref name="inputIndex"/>). Add right after
     /// the video map so the mix is the first audio track.
     /// </summary>
-    public static void AddOutputs(List<string> args, ClipStems stems, int inputIndex, string? singleTitle, bool mixOnly = false)
+    public static void AddOutputs(List<string> args, ClipStems stems, int inputIndex, bool mixOnly = false)
     {
-        if (stems.Both && !mixOnly)
+        if (stems.Separate && !mixOnly)
         {
-            // Six channels come in as one stream; pan picks each pair out again.
-            args.AddRange(["-filter_complex",
-                $"[{inputIndex}:a]asplit=3[x][y][z];[x]pan=stereo|c0=c0|c1=c1[mix];[y]pan=stereo|c0=c2|c1=c3[one];[z]pan=stereo|c0=c4|c1=c5[two]",
-                "-map", "[mix]", "-map", "[one]", "-map", "[two]"]);
-            AddCodec(args, [MixTitle, DesktopTitle, MicTitle]);
+            // All channels come in as one stream; pan picks each pair out again.
+            int n = stems.Tracks.Count + 1;
+            var graph = new StringBuilder($"[{inputIndex}:a]asplit={n}");
+            for (int i = 0; i < n; i++) graph.Append($"[s{i}]");
+            for (int i = 0; i < n; i++) graph.Append($";[s{i}]pan=stereo|c0=c{i * 2}|c1=c{i * 2 + 1}[o{i}]");
+            args.AddRange(["-filter_complex", graph.ToString()]);
+            for (int i = 0; i < n; i++) args.AddRange(["-map", $"[o{i}]"]);
+            AddCodec(args, [MixTitle, .. stems.Tracks.Select(t => t.Title)]);
         }
-        else if (stems.Both)
+        else if (stems.Separate)
         {
-            // Fallback: only the mix, exactly as clips were saved before stems existed.
+            // Fallback: only the mix, exactly as clips were saved before separate tracks existed.
             args.AddRange(["-filter_complex", $"[{inputIndex}:a]pan=stereo|c0=c0|c1=c1[mix]", "-map", "[mix]"]);
             AddCodec(args, [MixTitle]);
         }
         else
         {
             args.AddRange(["-map", $"{inputIndex}:a:0"]);
-            AddCodec(args, [singleTitle ?? MixTitle]);
+            AddCodec(args, [stems.Tracks[0].Title]);
         }
     }
 
@@ -145,9 +174,16 @@ public static partial class ClipAudio
         for (int i = 0; i < titles.Length; i++)
         {
             args.AddRange([$"-b:a:{i}", i == 0 ? "192k" : titles[i] == MicTitle ? "128k" : "160k"]);
-            args.AddRange([$"-metadata:s:a:{i}", "title=" + titles[i]]);
+            args.AddRange([$"-metadata:s:a:{i}", "title=" + CleanTitle(titles[i])]);
             args.AddRange([$"-disposition:a:{i}", i == 0 ? "default" : "0"]);
         }
+    }
+
+    /// <summary>A track title without anything that could upset FFmpeg's metadata handling.</summary>
+    private static string CleanTitle(string title)
+    {
+        string clean = new string(title.Where(c => !char.IsControl(c)).ToArray()).Trim();
+        return clean.Length == 0 ? "Audio" : clean.Length > 60 ? clean[..60] : clean;
     }
 
     // ---------------------------------------------------------------- reading
@@ -206,8 +242,8 @@ public static partial class ClipAudio
     }
 
     /// <summary>
-    /// Decodes the clip's audio for the player: the desktop and microphone stems when the clip has them, otherwise
-    /// its one track. Bounded by <paramref name="maxSeconds"/> so a stray long video cannot eat all memory.
+    /// Decodes the clip's audio for the player: its separate tracks when it has them, otherwise its one track.
+    /// Bounded by <paramref name="maxSeconds"/> so a stray long video cannot eat all memory.
     /// </summary>
     public static ClipStems Decode(string ffmpeg, string path, ClipInfo info, int maxSeconds, JobObject? job)
     {
@@ -227,16 +263,16 @@ public static partial class ClipAudio
             return pcm;
         }
 
-        if (!info.HasStems) return new ClipStems(Load(0), null);
-        short[] a = Load(1), b = Load(2);
-        if (a.Length != b.Length)
+        IReadOnlyList<int> streams = info.StemStreams;
+        var pcms = new short[streams.Count][];
+        Parallel.For(0, streams.Count, new ParallelOptions { MaxDegreeOfParallelism = 4 }, i => pcms[i] = Load(streams[i]));
+        // AAC padding can differ by a few samples; line the tracks up on the longest.
+        int n = pcms.Max(p => p.Length);
+        for (int i = 0; i < pcms.Length; i++)
         {
-            // AAC padding can differ by a few samples; line the stems up on the longer one.
-            int n = Math.Max(a.Length, b.Length);
-            Array.Resize(ref a, n);
-            Array.Resize(ref b, n);
+            if (pcms[i].Length != n) Array.Resize(ref pcms[i], n);
         }
-        return new ClipStems(a, b);
+        return new ClipStems(streams.Select((stream, i) => new ClipTrack(info.AudioTitles[stream], pcms[i])).ToList());
     }
 
     /// <summary>The loudest sample (0..1) in each <see cref="PeaksPerSecond"/>th of a second, for drawing a waveform.</summary>

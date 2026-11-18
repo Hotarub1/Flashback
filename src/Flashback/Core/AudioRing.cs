@@ -12,11 +12,14 @@ public sealed class AudioRing
     private const int ForwardTolerance = 1440;      // 30 ms: larger forward jumps are real gaps
     private const int BackwardTolerance = 4800;     // 100 ms
 
-    private readonly struct Packet(double time, long start, int frames)
+    private readonly struct Packet(double time, long start, int frames, bool resync, bool gap)
     {
         public readonly double Time = time;
         public readonly long Start = start;
         public readonly int Frames = frames;
+        public readonly bool Resync = resync;
+        /// <summary>Silence that was not stored: it only keeps the packets after it in their exact place.</summary>
+        public readonly bool Gap = gap;
     }
 
     private readonly object _lock = new();
@@ -30,6 +33,9 @@ public sealed class AudioRing
     public volatile int RetainSeconds = 50;
 
     public long TotalFrames { get; private set; }
+
+    /// <summary>Wall-clock time the newest captured audio ends at; 0 before any audio arrived.</summary>
+    public double LastUtc { get; private set; }
     public long TotalPackets { get; private set; }
 
     public void Clear()
@@ -46,7 +52,8 @@ public sealed class AudioRing
 
     /// <param name="timeUtc">Wall-clock time of the first frame.</param>
     /// <param name="stereo">Interleaved left/right samples.</param>
-    public void Append(double timeUtc, ReadOnlySpan<short> stereo)
+    /// <param name="resync">Packets before this one were left out on purpose: place it by its own time even if the gap is short.</param>
+    public void Append(double timeUtc, ReadOnlySpan<short> stereo, bool resync = false)
     {
         int frames = stereo.Length / 2;
         if (frames == 0) return;
@@ -66,9 +73,24 @@ public sealed class AudioRing
                 done += n;
                 _writeFrame += n;
             }
-            _packets.Enqueue(new Packet(timeUtc, start, frames));
+            _packets.Enqueue(new Packet(timeUtc, start, frames, resync, false));
             TotalFrames += frames;
+            LastUtc = timeUtc + frames / (double)SampleRate;
             TotalPackets++;
+            Trim(timeUtc - RetainSeconds);
+        }
+    }
+
+    /// <summary>
+    /// Records <paramref name="frames"/> of silence without storing it. The audio after it then follows on sample for
+    /// sample, exactly as if the silence had been kept, instead of being placed by its own (slightly jittery) time.
+    /// </summary>
+    public void AppendGap(double timeUtc, int frames, bool resync = false)
+    {
+        if (frames <= 0) return;
+        lock (_lock)
+        {
+            _packets.Enqueue(new Packet(timeUtc, _writeFrame, frames, resync, true));
             Trim(timeUtc - RetainSeconds);
         }
     }
@@ -110,8 +132,13 @@ public sealed class AudioRing
                 long ideal = (long)Math.Round((p.Time - startUtc) * SampleRate);
                 // Packets normally follow each other exactly. Only re-anchor on a real gap or a clock jump,
                 // so tiny timestamp jitter never causes clicks.
-                if (pos == long.MinValue || ideal - pos > ForwardTolerance || pos - ideal > BackwardTolerance) pos = ideal;
+                if (pos == long.MinValue || p.Resync || ideal - pos > ForwardTolerance || pos - ideal > BackwardTolerance) pos = ideal;
 
+                if (p.Gap)
+                {
+                    pos += p.Frames;
+                    continue;
+                }
                 long from = Math.Max(0, -pos);
                 long to = Math.Min(p.Frames, total - pos);
                 for (long i = from; i < to;)

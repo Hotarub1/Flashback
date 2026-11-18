@@ -10,7 +10,7 @@ using Flashback.Core;
 namespace Flashback;
 
 /// <summary>
-/// The clip player: video through a MediaElement, audio through <see cref="StemPlayer"/> so desktop audio and the
+/// The clip player: video through a MediaElement, audio through <see cref="StemPlayer"/> so each app and the
 /// microphone can be balanced while watching, a timeline for trimming, and full-screen viewing. Trimmed copies are
 /// written by <see cref="ClipEditor"/>.
 /// </summary>
@@ -18,21 +18,41 @@ public partial class MainWindow
 {
     /// <summary>Longer clips play with their mixed audio only: ten minutes of decoded tracks already take about 230 MB.</summary>
     private const int MaxStemSeconds = 600;
-    private static readonly Color DesktopColor = Color.FromRgb(0x2D, 0xD4, 0xBF);
     private static readonly Color MicColor = Color.FromRgb(0xF5, 0x9E, 0x0B);
+    /// <summary>Colours for desktop audio and the apps, in track order. The microphone keeps its own amber.</summary>
+    private static readonly Color[] TrackColors =
+    [
+        Color.FromRgb(0x2D, 0xD4, 0xBF), Color.FromRgb(0x60, 0xA5, 0xFA), Color.FromRgb(0xA7, 0x8B, 0xFA), Color.FromRgb(0xF4, 0x72, 0xB6),
+        Color.FromRgb(0xA3, 0xE6, 0x35), Color.FromRgb(0xFB, 0x71, 0x85), Color.FromRgb(0x22, 0xD3, 0xEE), Color.FromRgb(0xFB, 0x92, 0x3C),
+    ];
+
+    /// <summary>
+    /// While the playhead is dragged the video is asked for a new frame at most this often. Every seek makes the
+    /// player decode from the previous keyframe; asking on every mouse movement queued up far more work than it could
+    /// do, which made dragging lag behind the mouse and stutter.
+    /// </summary>
+    private const int ScrubSeekIntervalMs = 90;
     private static readonly Brush BarBackground = new SolidColorBrush(Color.FromRgb(0x0B, 0x0B, 0x0D));
     private static readonly Brush BarOverlay = new SolidColorBrush(Color.FromArgb(0xD0, 0x0B, 0x0B, 0x0D));
 
     private readonly DispatcherTimer _playerTimer = new() { Interval = TimeSpan.FromMilliseconds(50) };
     private readonly DispatcherTimer _hideControls = new() { Interval = TimeSpan.FromSeconds(2.5) };
+    private readonly DispatcherTimer _scrubTimer = new() { Interval = TimeSpan.FromMilliseconds(30) };
+    /// <summary>Writes the volume to the settings once the slider has rested, not on every step of a drag.</summary>
+    private readonly DispatcherTimer _volumeSave = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly List<(Slider Slider, TextBlock Percent)> _trackControls = new();
 
     private ClipItem? _playing;
-    private bool _isPlaying, _dragging, _updatingSeek, _muted, _exporting, _fullscreen, _resettingEditor;
+    private bool _isPlaying, _dragging, _updatingSeek, _muted, _exporting, _fullscreen, _resettingEditor, _volumeReady;
     private int _openVersion;
     private ClipInfo? _info;
     private StemPlayer? _stemPlayer;
     private double _lastVideoPos = -1, _prevTickPos;
     private long _lastVideoAdvance;
+    private bool _scrubbing, _resumeAfterScrub, _scrubPending;
+    private double _scrubTarget, _scrubApplied = -1;
+    private long _lastScrubSeek;
+    private int _scrubSeeks;
     private WindowState _prevState;
     private WindowStyle _prevStyle;
     private ResizeMode _prevResize;
@@ -50,9 +70,16 @@ public partial class MainWindow
             ControlBar.Visibility = Visibility.Hidden;
             PlayerSurface.Cursor = Cursors.None;
         };
-        Timeline.SeekRequested += SeekTo;
-        Timeline.ScrubStarted += () => _dragging = true;
-        Timeline.ScrubEnded += () => _dragging = false;
+        _scrubTimer.Tick += (_, _) =>
+        {
+            if (_scrubPending && Environment.TickCount64 - _lastScrubSeek >= ScrubSeekIntervalMs) ApplyScrubSeek();
+        };
+        _volumeSave.Tick += (_, _) => SaveVolume();
+        VolumeSlider.Value = _engine.Settings.Current.PlayerVolume;
+        _volumeReady = true;
+        Timeline.SeekRequested += ScrubTo;
+        Timeline.ScrubStarted += BeginScrub;
+        Timeline.ScrubEnded += EndScrub;
         Timeline.TrimChanged += () =>
         {
             UpdateTrimInfo();
@@ -87,8 +114,7 @@ public partial class MainWindow
         try
         {
             // The clip's mixed track plays until its separate tracks are decoded, then those take over.
-            Player.IsMuted = _muted || PlayerSilent;
-            Player.Volume = 1;
+            ApplyVolume();
             Player.Source = new Uri(item.Path);
             Player.Play();
             _isPlaying = true;
@@ -105,7 +131,10 @@ public partial class MainWindow
 
     private void ClosePlayer()
     {
+        if (_volumeSave.IsEnabled) SaveVolume();
         _playerTimer.Stop();
+        _scrubTimer.Stop();
+        _scrubbing = _dragging = _scrubPending = false;
         _openVersion++;
         if (_playing == null && PlayerOverlay.Visibility != Visibility.Visible) return;
         SetFullscreen(false);
@@ -133,11 +162,7 @@ public partial class MainWindow
         Timeline.Position = 0;
         Timeline.TrimStart = 0;
         Timeline.TrimEnd = 0;
-        TrackASlider.Value = 100;
-        TrackBSlider.Value = 100;
-        TrackASlider.IsEnabled = true;
-        TrackALabel.Text = "Audio";
-        TrackBRow.Visibility = Visibility.Collapsed;
+        BuildTrackRows([("Audio", TrackColors[0])]);
         _resettingEditor = false;
         SetAudioNote("");
         ExportProgress.Visibility = Visibility.Collapsed;
@@ -172,14 +197,13 @@ public partial class MainWindow
             {
                 SetAudioNote("This clip has no audio.");
                 Timeline.SetTracks([]);
-                TrackALabel.Text = "No audio";
-                TrackASlider.IsEnabled = false;
+                BuildTrackRows([("No audio", TrackColors[0])], enabled: false);
                 return;
             }
             if (info.Seconds > MaxStemSeconds)
             {
                 SetAudioNote("Clips longer than 10 minutes play with their mixed audio.");
-                Timeline.SetTracks([]);
+                ShowTrackRows(info, loading: false);
                 return;
             }
 
@@ -199,54 +223,100 @@ public partial class MainWindow
                 Log.Warn("Clip audio output stopped: " + message);
                 _stemPlayer?.Dispose();
                 _stemPlayer = null;
-                Player.IsMuted = _muted || PlayerSilent;
                 ApplyGains();
                 SetAudioNote("Audio output stopped; playing the clip's mixed audio.");
             };
             _stemPlayer = player;
-            player.Muted = _muted || PlayerSilent;
-            Player.IsMuted = true;
             _lastVideoPos = -1; // line the audio up with the picture on the next tick
-            ApplyGains();
+            ApplyGains();       // also mutes the video's own sound, now that the tracks play it
         }
         catch (Exception ex)
         {
             Log.Warn($"Clip audio could not be loaded for {item.Path}: {ex.Message}");
-            if (version == _openVersion)
+            if (version == _openVersion && _info != null)
             {
                 SetAudioNote("Separate volume for each track is not available for this clip.");
-                Timeline.SetTracks([]);
+                ShowTrackRows(_info, loading: false);
             }
         }
     }
 
+    /// <summary>
+    /// Shows the clip's audio tracks: a volume row each beside the timeline (made once, when the clip has been read)
+    /// and a waveform each in the timeline (once the audio is decoded; without <paramref name="stems"/> the rows stay
+    /// empty, or say "Loading audio" while <paramref name="loading"/>).
+    /// </summary>
     private void ShowTrackRows(ClipInfo info, bool loading, ClipStems? stems = null)
     {
-        var tracks = new List<TimelineTrack>();
-        if (info.HasStems)
+        IReadOnlyList<int> streams = info.StemStreams;
+        var rows = new List<(string Label, Color Color)>();
+        int colour = 0;
+        foreach (int stream in streams)
         {
-            TrackALabel.Text = Label(info.AudioTitles[1], "Desktop audio");
-            TrackBLabel.Text = Label(info.AudioTitles[2], "Microphone");
-            TrackBRow.Visibility = Visibility.Visible;
-            tracks.Add(new TimelineTrack(TrackALabel.Text, DesktopColor, stems != null ? ClipAudio.Peaks(stems.First) : []));
-            tracks.Add(new TimelineTrack(TrackBLabel.Text, MicColor, stems?.Second != null ? ClipAudio.Peaks(stems.Second) : []));
+            string title = info.AudioTitles[stream];
+            rows.Add((TrackLabel(title), title == ClipAudio.MicTitle ? MicColor : TrackColors[colour++ % TrackColors.Length]));
         }
-        else if (info.AudioStreams > 0)
-        {
-            TrackALabel.Text = Label(info.AudioTitles[0], "Audio");
-            TrackBRow.Visibility = Visibility.Collapsed;
-            tracks.Add(new TimelineTrack(TrackALabel.Text, info.AudioTitles[0] == ClipAudio.MicTitle ? MicColor : DesktopColor,
-                stems != null ? ClipAudio.Peaks(stems.First) : []));
-        }
-        if (!loading || tracks.Count > 0) Timeline.SetTracks(tracks);
+        if (stems == null) BuildTrackRows(rows);
 
-        static string Label(string title, string fallback) => title switch
+        var tracks = new List<TimelineTrack>();
+        for (int i = 0; i < rows.Count; i++)
         {
-            ClipAudio.DesktopTitle => "Desktop audio",
-            ClipAudio.MicTitle => "Microphone",
-            ClipAudio.MixTitle or "" => fallback,
-            _ => title,
-        };
+            float[] peaks = stems != null && i < stems.Tracks.Count ? ClipAudio.Peaks(stems.Tracks[i].Pcm) : loading ? [] : [0f];
+            tracks.Add(new TimelineTrack(rows[i].Label, rows[i].Color, peaks));
+        }
+        Timeline.SetTracks(tracks);
+    }
+
+    private static string TrackLabel(string title) => title switch
+    {
+        ClipAudio.DesktopTitle => "Desktop audio",
+        ClipAudio.MicTitle => "Microphone",
+        ClipAudio.MixTitle or "" => "Audio",
+        _ => title,
+    };
+
+    /// <summary>Makes one volume row per track beside the timeline, at the timeline's row height.</summary>
+    private void BuildTrackRows(IReadOnlyList<(string Label, Color Color)> rows, bool enabled = true)
+    {
+        bool was = _resettingEditor;
+        _resettingEditor = true;
+        TrackRows.Children.Clear();
+        _trackControls.Clear();
+        double height = TimelineControl.TrackHeightFor(rows.Count);
+        bool compact = height < TimelineControl.TrackHeight;
+        foreach (var (label, color) in rows)
+        {
+            var percent = new TextBlock { Foreground = (Brush)FindResource("TextMuted"), FontSize = 11, Text = "100%" };
+            DockPanel.SetDock(percent, Dock.Right);
+            var name = new TextBlock
+            {
+                Foreground = new SolidColorBrush(color), FontSize = 12, Text = label, TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = label,
+            };
+            var header = new DockPanel();
+            header.Children.Add(percent);
+            header.Children.Add(name);
+            var slider = new Slider
+            {
+                Minimum = 0, Maximum = 200, Value = 100, SmallChange = 5, LargeChange = 25, IsEnabled = enabled,
+                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, compact ? -6 : -4, 0, 0),
+                ToolTip = "Volume of this track while watching and in a saved trim",
+            };
+            slider.ValueChanged += TrackVolume_Changed;
+            Grid.SetRow(slider, 1);
+            var grid = new Grid();
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            grid.Children.Add(header);
+            grid.Children.Add(slider);
+            TrackRows.Children.Add(new Border
+            {
+                Height = height, Margin = new Thickness(0, TimelineControl.RowGap, 0, 0), Background = (Brush)FindResource("CardBackground"),
+                CornerRadius = new CornerRadius(4), Padding = new Thickness(10, compact ? 1 : 3, 10, 0), Child = grid,
+            });
+            _trackControls.Add((slider, percent));
+        }
+        _resettingEditor = was;
+        ApplyGains();
     }
 
     private void ApplyDuration(double seconds)
@@ -278,7 +348,9 @@ public partial class MainWindow
 
     // ================================================================ playback
 
-    private void UpdatePlayGlyph() => PlayPauseGlyph.Text = _isPlaying ? "" : "";
+    private void UpdatePlayGlyph() => SetPlayGlyph(_isPlaying);
+
+    private void SetPlayGlyph(bool playing) => PlayPauseGlyph.Text = playing ? "" : "";
 
     private double VideoDuration => Timeline.Duration > 0 ? Timeline.Duration
         : Player.NaturalDuration.HasTimeSpan ? Player.NaturalDuration.TimeSpan.TotalSeconds : 0;
@@ -288,6 +360,13 @@ public partial class MainWindow
     private void TogglePlay()
     {
         if (_playing == null) return;
+        if (_scrubbing)
+        {
+            // Space while dragging: decide whether playback continues once the playhead is let go.
+            _resumeAfterScrub = !_resumeAfterScrub;
+            SetPlayGlyph(_resumeAfterScrub);
+            return;
+        }
         if (_isPlaying) Player.Pause();
         else
         {
@@ -308,15 +387,88 @@ public partial class MainWindow
         UpdatePlayGlyph();
     }
 
+    private double ClampToClip(double seconds)
+    {
+        double total = VideoDuration;
+        return Math.Clamp(seconds, 0, total > 0 ? total : Math.Max(0, seconds));
+    }
+
     private void SeekTo(double seconds)
     {
         if (_playing == null) return;
-        double total = VideoDuration;
-        seconds = Math.Clamp(seconds, 0, total > 0 ? total : seconds);
+        seconds = ClampToClip(seconds);
         Player.Position = TimeSpan.FromSeconds(seconds);
         _prevTickPos = seconds;
         _stemPlayer?.Seek(seconds);
         ShowPosition(seconds);
+    }
+
+    // ---------------------------------------------------------------- dragging the playhead
+
+    /// <summary>
+    /// The playhead is being dragged (on the timeline or the seek bar). Playback pauses until it is let go, the clip's
+    /// separate audio stays quiet, and the picture follows the mouse at a pace the video decoder can keep up with.
+    /// </summary>
+    private void BeginScrub()
+    {
+        if (_scrubbing || _playing == null) return;
+        _scrubbing = _dragging = true;
+        _resumeAfterScrub = _isPlaying;
+        if (_isPlaying)
+        {
+            Player.Pause();
+            _isPlaying = false;
+        }
+        if (_stemPlayer != null) _stemPlayer.Playing = false;
+        _scrubTarget = Player.Position.TotalSeconds;
+        _scrubApplied = -1;
+        _scrubPending = false;
+        _lastScrubSeek = 0;
+        _scrubTimer.Start();
+    }
+
+    private void ScrubTo(double seconds)
+    {
+        if (_playing == null) return;
+        if (!_scrubbing)
+        {
+            SeekTo(seconds);
+            return;
+        }
+        _scrubTarget = ClampToClip(seconds);
+        _scrubPending = true;
+        ShowPosition(_scrubTarget);
+        if (Environment.TickCount64 - _lastScrubSeek >= ScrubSeekIntervalMs) ApplyScrubSeek();
+    }
+
+    private void ApplyScrubSeek()
+    {
+        _scrubPending = false;
+        if (_scrubTarget == _scrubApplied) return;
+        _lastScrubSeek = Environment.TickCount64;
+        _scrubApplied = _scrubTarget;
+        _scrubSeeks++;
+        Player.Position = TimeSpan.FromSeconds(_scrubTarget);
+    }
+
+    private void EndScrub()
+    {
+        if (!_scrubbing) return;
+        _scrubbing = _dragging = _scrubPending = false;
+        _scrubTimer.Stop();
+        if (_playing == null) return;
+        double target = _scrubTarget;
+        if (target != _scrubApplied) Player.Position = TimeSpan.FromSeconds(target);
+        _prevTickPos = target;
+        _stemPlayer?.Seek(target);
+        ShowPosition(target);
+        if (_resumeAfterScrub)
+        {
+            Player.Play();
+            _isPlaying = true;
+            _lastVideoPos = -1;
+        }
+        UpdatePlayGlyph();
     }
 
     private void SeekBy(double seconds)
@@ -426,27 +578,90 @@ public partial class MainWindow
         e.Handled = true;
     }
 
-    private void Seek_DragStarted(object sender, DragStartedEventArgs e) => _dragging = true;
+    private void Seek_DragStarted(object sender, DragStartedEventArgs e) => BeginScrub();
 
     private void Seek_DragCompleted(object sender, DragCompletedEventArgs e)
     {
-        _dragging = false;
-        if (_playing != null) SeekTo(SeekSlider.Value);
+        if (!_scrubbing) return;
+        _scrubTarget = ClampToClip(SeekSlider.Value);
+        EndScrub();
     }
 
     private void Seek_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (_updatingSeek || _playing == null || Player == null) return;
-        SeekTo(e.NewValue);
+        ScrubTo(e.NewValue);
     }
 
     private void ToggleMute()
     {
-        _muted = !_muted;
-        MuteGlyph.Text = _muted ? "" : "";
-        MuteButton.ToolTip = _muted ? "Unmute (M)" : "Mute (M)";
-        if (_stemPlayer != null) _stemPlayer.Muted = _muted || PlayerSilent;
-        Player.IsMuted = _stemPlayer != null || _muted || PlayerSilent;
+        // With the slider all the way down, "unmute" means turning it back up to something audible.
+        if (!_muted && VolumeSlider.Value <= 0) VolumeSlider.Value = 50;
+        else _muted = !_muted;
+        ApplyVolume();
+    }
+
+    private void Volume_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (!_volumeReady) return;
+        _muted = false; // moving the volume means wanting to hear it, as in other players
+        ApplyVolume();
+        _volumeSave.Stop();
+        _volumeSave.Start();
+    }
+
+    private void Volume_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        NudgeVolume(e.Delta > 0 ? 5 : -5);
+        e.Handled = true;
+    }
+
+    private void NudgeVolume(int percent)
+    {
+        _muted = false; // also when the slider is already at the end and does not move
+        VolumeSlider.Value = Math.Clamp(Math.Round((VolumeSlider.Value + percent) / 5) * 5, 0, 100);
+        ApplyVolume();
+    }
+
+    private void SaveVolume()
+    {
+        _volumeSave.Stop();
+        int volume = (int)Math.Round(VolumeSlider.Value);
+        AppSettings s = _engine.Settings.Current;
+        if (s.PlayerVolume == volume) return;
+        s.PlayerVolume = volume;
+        _engine.Settings.Save(s);
+    }
+
+    /// <summary>
+    /// The volume slider as a level for the sound: squared, so the slider sounds even along its length (half way is
+    /// a quarter of the level, about -12 dB) instead of all the change happening near the bottom. Zero while muted.
+    /// </summary>
+    private float MasterVolume => _muted ? 0f : (float)Math.Pow(VolumeSlider.Value / 100, 2);
+
+    /// <summary>Applies the volume slider and mute to whichever output is playing the clip's sound, and updates the speaker icon.</summary>
+    private void ApplyVolume()
+    {
+        float master = MasterVolume;
+        bool silent = _muted || PlayerSilent;
+        if (_stemPlayer != null)
+        {
+            _stemPlayer.Volume = master;
+            _stemPlayer.Muted = silent;
+            Player.IsMuted = true;
+        }
+        else
+        {
+            // The video's own (mixed) sound: its track slider and the volume together.
+            float[] gains = Gains;
+            Player.IsMuted = silent;
+            Player.Volume = Math.Clamp((gains.Length > 0 ? gains.Max() : 1) * master, 0, 1);
+        }
+
+        double v = VolumeSlider.Value;
+        MuteGlyph.Text = _muted ? "" : v <= 0 ? "" : v < 34 ? "" : v < 67 ? "" : "";
+        MuteButton.ToolTip = _muted || v <= 0 ? "Unmute (M)" : "Mute (M)";
+        VolumeSlider.ToolTip = $"Volume {(_muted ? 0 : v):0}% (Up / Down, or the mouse wheel). Saved trims are not affected.";
     }
 
     private void PlayerShowInFolder_Click(object sender, RoutedEventArgs e)
@@ -471,6 +686,8 @@ public partial class MainWindow
             case Key.Space: TogglePlay(); break;
             case Key.Left: SeekBy(-5); break;
             case Key.Right: SeekBy(5); break;
+            case Key.Up: NudgeVolume(5); break;
+            case Key.Down: NudgeVolume(-5); break;
             case Key.OemComma: StepFrame(-1); break;
             case Key.OemPeriod: StepFrame(1); break;
             case Key.Home: SeekTo(0); break;
@@ -544,20 +761,21 @@ public partial class MainWindow
 
     private void TrackVolume_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_resettingEditor || TrackAPercent == null || TrackBPercent == null) return;
+        if (_resettingEditor) return;
         ApplyGains();
         UpdateEditorButtons();
     }
 
     private static float Gain(Slider s) => (float)(Math.Round(s.Value / 5) * 5 / 100);
 
+    private float[] Gains => _trackControls.Select(c => Gain(c.Slider)).ToArray();
+
     private void ApplyGains()
     {
-        float a = Gain(TrackASlider), b = Gain(TrackBSlider);
-        TrackAPercent.Text = $"{a * 100:0}%";
-        TrackBPercent.Text = $"{b * 100:0}%";
-        if (_stemPlayer != null) _stemPlayer.SetGains(a, b);
-        else Player.Volume = Math.Clamp(a, 0, 1);
+        float[] gains = Gains;
+        for (int i = 0; i < gains.Length; i++) _trackControls[i].Percent.Text = $"{gains[i] * 100:0}%";
+        _stemPlayer?.SetGains(gains);
+        ApplyVolume();
     }
 
     private void SetTrimHere(bool start)
@@ -577,7 +795,7 @@ public partial class MainWindow
         else TrimInfo.Text = $"Keep {FormatTime(Timeline.TrimStart)} – {FormatTime(Timeline.TrimEnd)}  ({Timeline.TrimEnd - Timeline.TrimStart:0.0} s)";
     }
 
-    private bool EditorChanged => Timeline.IsTrimmed || Gain(TrackASlider) != 1f || (TrackBRow.Visibility == Visibility.Visible && Gain(TrackBSlider) != 1f);
+    private bool EditorChanged => Timeline.IsTrimmed || Gains.Any(g => g != 1f);
 
     private void UpdateEditorButtons()
     {
@@ -593,8 +811,7 @@ public partial class MainWindow
         if (_playing == null || _info == null || _exporting || _engine.FfmpegPath is not { } ffmpeg) return;
         ClipItem item = _playing;
         string output = ClipLibrary.UniquePath(Path.GetDirectoryName(item.Path)!, item.Name + " (trimmed)");
-        var request = new TrimRequest(item.Path, output, Timeline.TrimStart, Timeline.TrimEnd, Gain(TrackASlider), Gain(TrackBSlider),
-            _info, _engine.Settings.Current.Quality);
+        var request = new TrimRequest(item.Path, output, Timeline.TrimStart, Timeline.TrimEnd, Gains, _info, _engine.Settings.Current.Quality);
         _exporting = true;
         UpdateEditorButtons();
         ExportProgress.Value = 0;
@@ -641,4 +858,47 @@ public partial class MainWindow
     }
 
     public void ClosePlayerForTest() => ClosePlayer();
+
+    /// <summary>Works the volume slider, mute and the volume keys the way a user would and reports what reaches the outputs.</summary>
+    public string VolumeCheck()
+    {
+        double before = VolumeSlider.Value;
+        bool wasMuted = _muted;
+        var steps = new List<string>();
+        void Step(string name) => steps.Add($"{name}: slider={VolumeSlider.Value:0} muted={_muted} " +
+            $"stems={(_stemPlayer is { } sp ? $"{sp.Volume:F4}{(sp.Muted ? " (silent)" : "")}" : "off")} " +
+            $"video={Player.Volume:F4}{(Player.IsMuted ? " (muted)" : "")} icon=U+{(int)MuteGlyph.Text[0]:X4}");
+        VolumeSlider.Value = 50; Step("set 50%");
+        ToggleMute(); Step("M");
+        NudgeVolume(5); Step("Up");
+        VolumeSlider.Value = 0; Step("set 0%");
+        ToggleMute(); Step("M at 0%");
+        _muted = wasMuted;
+        VolumeSlider.Value = before;
+        ApplyVolume();
+        return string.Join("; ", steps);
+    }
+
+    /// <summary>Drags the playhead the way a mouse would (a move every few milliseconds) and reports what the video got asked to do.</summary>
+    public async Task<string> ScrubCheckAsync()
+    {
+        double total = VideoDuration;
+        if (_playing == null || total < 1) return "no clip to drag through";
+        bool wasPlaying = _isPlaying;
+        int seeksBefore = _scrubSeeks, moves = 0;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        BeginScrub();
+        while (watch.ElapsedMilliseconds < 1500)
+        {
+            ScrubTo(total * (0.1 + 0.8 * watch.ElapsedMilliseconds / 1500.0));
+            moves++;
+            await Task.Delay(4);
+        }
+        double target = total * 0.5;
+        ScrubTo(target);
+        EndScrub();
+        await Task.Delay(600);
+        return $"{moves} moves in {watch.ElapsedMilliseconds} ms gave {_scrubSeeks - seeksBefore} video seeks; let go at {target:F2}s, " +
+               $"video now at {Player.Position.TotalSeconds:F2}s, playing={_isPlaying} (was {wasPlaying}), {PlayerDebug()}";
+    }
 }

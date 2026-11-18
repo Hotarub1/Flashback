@@ -22,6 +22,8 @@ public sealed class AppSettings
     public bool CaptureCursor { get; set; } = true;
 
     public bool DesktopAudio { get; set; } = true;
+    /// <summary>Also capture each app on its own, so clips get one track per app (the game, Discord) next to the mix.</summary>
+    public bool SeparateAppAudio { get; set; } = true;
     public bool Microphone { get; set; } = true;
     /// <summary>Null means "whatever Windows has as the default microphone".</summary>
     public string? MicDeviceId { get; set; }
@@ -35,6 +37,8 @@ public sealed class AppSettings
     public bool StartWithWindows { get; set; }
     public bool CloseToTray { get; set; } = true;
     public bool TrayHintShown { get; set; }
+    /// <summary>The clip player's volume slider (0-100), remembered between clips and restarts.</summary>
+    public int PlayerVolume { get; set; } = 100;
 
     /// <summary>Not shown in the UI. Forces the CPU encoder, for troubleshooting.</summary>
     public bool ForceSoftwareEncoder { get; set; }
@@ -53,6 +57,7 @@ public sealed class AppSettings
         if (Fps != 30 && Fps != 60) Fps = 60;
         if (ClipHeight is not (0 or 720 or 1080 or 1440)) ClipHeight = 0;
         MicVolume = Math.Clamp(MicVolume, 0, 300);
+        PlayerVolume = Math.Clamp(PlayerVolume, 0, 100);
         HotkeyModifiers &= 0xF;
         if (string.IsNullOrWhiteSpace(MicDeviceId)) MicDeviceId = null;
         if (string.IsNullOrWhiteSpace(HotkeySoundName)) HotkeySoundName = null;

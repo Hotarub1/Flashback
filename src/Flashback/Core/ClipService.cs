@@ -13,6 +13,7 @@ public sealed class ClipService
     private readonly VideoRecorder _recorder;
     private readonly AudioSource _desktop;
     private readonly AudioSource _mic;
+    private readonly AppAudioCapture _apps;
     private readonly JobObject _job;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
@@ -22,12 +23,13 @@ public sealed class ClipService
     /// </summary>
     private const double SoundCutLeadSeconds = 0.05;
 
-    public ClipService(string ffmpeg, VideoRecorder recorder, AudioSource desktop, AudioSource mic, JobObject job)
+    public ClipService(string ffmpeg, VideoRecorder recorder, AudioSource desktop, AudioSource mic, AppAudioCapture apps, JobObject job)
     {
         _ffmpeg = ffmpeg;
         _recorder = recorder;
         _desktop = desktop;
         _mic = mic;
+        _apps = apps;
         _job = job;
     }
 
@@ -84,9 +86,9 @@ public sealed class ClipService
 
             // Give the last few milliseconds of audio time to arrive from the sound card.
             Thread.Sleep(150);
-            (ClipStems? stems, string? singleTitle) = s.DesktopAudio || s.Microphone
+            ClipStems? stems = s.DesktopAudio || s.Microphone
                 ? BuildAudio(chosen, s, silenceAfterPress ? pressed - SoundCutLeadSeconds : null)
-                : (null, null);
+                : null;
 
             File.WriteAllText(listFile, ConcatList(chosen, quickProbe: true), new UTF8Encoding(false));
 
@@ -115,7 +117,7 @@ public sealed class ClipService
                 int outH = s.ClipHeight;
                 int outW = (int)Math.Round(srcW * (double)outH / srcH / 2) * 2;
                 (int cq, int kbps) = AppSettings.VideoQuality(s.Quality, outW, outH, fps);
-                (code, err) = Mux(listFile, partFile, stems, singleTitle, timeout,
+                (code, err) = Mux(listFile, partFile, stems, timeout,
                     ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
                     [
                         "-vf", $"scale_cuda={outW}:{outH}", "-c:v", "h264_nvenc", "-preset", "p3", "-tune", "hq", "-rc", "vbr",
@@ -127,7 +129,7 @@ public sealed class ClipService
                     TryDelete(partFile);
                 }
             }
-            if (code != 0) (code, err) = Mux(listFile, partFile, stems, singleTitle, timeout, [], ["-c:v", "copy"]);
+            if (code != 0) (code, err) = Mux(listFile, partFile, stems, timeout, [], ["-c:v", "copy"]);
             if (code != 0 && !err.StartsWith("Timed out", StringComparison.Ordinal))
             {
                 // Let FFmpeg probe every piece in full, exactly as before the quick probe existed.
@@ -135,15 +137,15 @@ public sealed class ClipService
                 Log.Warn($"Saving failed ({code}), retrying with full probing. {Ffmpeg.LastLine(err)}");
                 TryDelete(partFile);
                 File.WriteAllText(fullProbeListFile, ConcatList(chosen, quickProbe: false), new UTF8Encoding(false));
-                (code, err) = Mux(fullProbeListFile, partFile, stems, singleTitle, timeout, [], ["-c:v", "copy"]);
+                (code, err) = Mux(fullProbeListFile, partFile, stems, timeout, [], ["-c:v", "copy"]);
             }
-            if (code != 0 && !err.StartsWith("Timed out", StringComparison.Ordinal) && stems is { Both: true })
+            if (code != 0 && !err.StartsWith("Timed out", StringComparison.Ordinal) && stems is { Separate: true })
             {
                 // Last resort: one mixed audio track, exactly as clips were saved before they carried separate
-                // desktop and microphone tracks. The clip is kept even if the separate tracks cannot be written.
+                // tracks. The clip is kept even if the separate tracks cannot be written.
                 Log.Warn($"Saving failed ({code}), retrying with a single mixed audio track. {Ffmpeg.LastLine(err)}");
                 TryDelete(partFile);
-                (code, err) = Mux(fullProbeListFile, partFile, stems, singleTitle, timeout, [], ["-c:v", "copy"], mixOnly: true);
+                (code, err) = Mux(fullProbeListFile, partFile, stems, timeout, [], ["-c:v", "copy"], mixOnly: true);
             }
 
             if (code != 0 || !File.Exists(partFile) || new FileInfo(partFile).Length < 1024)
@@ -214,9 +216,10 @@ public sealed class ClipService
 
     /// <summary>
     /// Lays desktop and microphone audio out against the chosen video, sample-accurately by wall-clock time.
-    /// Each source is rendered on its own; the clip gets both as separate tracks plus their mix.
+    /// Each source is rendered on its own; the clip gets them as separate tracks plus their mix. With separate app
+    /// tracks on, the desktop sound is split into one track per app when those tracks account for it.
     /// </summary>
-    private (ClipStems Stems, string? SingleTitle) BuildAudio(List<Segment> chosen, AppSettings s, double? silenceFromUtc)
+    private ClipStems BuildAudio(List<Segment> chosen, AppSettings s, double? silenceFromUtc)
     {
         // Group back-to-back segments so each uninterrupted stretch of video gets one stretch of audio.
         var parts = new List<(double Start, double End)>();
@@ -237,16 +240,41 @@ public sealed class ClipService
             if (mic != null) micFrames += _mic.Ring.Render(start, end, mic, offset, s.MicVolume / 100f);
             offset += (long)Math.Round((end - start) * AudioRing.SampleRate);
         }
+
+        List<ClipTrack>? apps = null;
+        string appNote = "";
+        if (desktop != null && s.SeparateAppAudio && _apps.IsRunning)
+        {
+            try
+            {
+                apps = AppTracks.Build(_apps.Snapshot(), parts, totalFrames, desktop, out appNote);
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Building the app tracks failed; saving one desktop track", ex);
+                apps = null;
+                appNote = "failed";
+            }
+        }
+
         long silenced = 0;
         if (silenceFromUtc is double cut)
         {
             if (desktop != null) silenced = SilenceFrom(desktop, parts, cut);
             if (mic != null) silenced = SilenceFrom(mic, parts, cut);
+            foreach (ClipTrack t in apps ?? []) SilenceFrom(t.Pcm, parts, cut);
         }
         Log.Info($"Clip audio: desktop {desktopFrames / (double)AudioRing.SampleRate:F1}s, microphone {micFrames / (double)AudioRing.SampleRate:F1}s of {totalFrames / (double)AudioRing.SampleRate:F1}s"
-                 + (silenced > 0 ? $", last {silenced / (double)AudioRing.SampleRate:F2}s silenced (after the hotkey press)" : ""));
-        if (desktop != null && mic != null) return (new ClipStems(desktop, mic), null);
-        return desktop != null ? (new ClipStems(desktop, null), ClipAudio.DesktopTitle) : (new ClipStems(mic!, null), ClipAudio.MicTitle);
+                 + (silenced > 0 ? $", last {silenced / (double)AudioRing.SampleRate:F2}s silenced (after the hotkey press)" : "")
+                 + (appNote.Length == 0 ? "" : apps != null ? $"; app tracks: {appNote}" : $"; one desktop track because {appNote}"));
+
+        var tracks = new List<ClipTrack>();
+        if (apps != null) tracks.AddRange(apps);
+        else if (desktop != null) tracks.Add(new ClipTrack(ClipAudio.DesktopTitle, desktop));
+        if (mic != null) tracks.Add(new ClipTrack(ClipAudio.MicTitle, mic));
+        if (apps == null) return new ClipStems(tracks);
+        // The mix stays the full desktop capture plus the microphone, so it has every sound even if no app track caught it.
+        return new ClipStems(tracks, mic != null ? [desktop!, mic] : [desktop!]);
     }
 
     /// <summary>
@@ -279,7 +307,7 @@ public sealed class ClipService
         return totalFrames - cutFrame;
     }
 
-    private (int Code, string Err) Mux(string listFile, string output, ClipStems? stems, string? singleTitle, int timeoutMs,
+    private (int Code, string Err) Mux(string listFile, string output, ClipStems? stems, int timeoutMs,
         string[] inputOptions, string[] videoOptions, bool mixOnly = false)
     {
         var args = new List<string> { "-hide_banner", "-loglevel", "error", "-nostats", "-y" };
@@ -287,7 +315,7 @@ public sealed class ClipService
         args.AddRange(["-f", "concat", "-safe", "0", "-i", listFile]);
         if (stems != null) ClipAudio.AddPipeInput(args, stems);
         args.AddRange(["-map", "0:v:0"]);
-        if (stems != null) ClipAudio.AddOutputs(args, stems, 1, singleTitle, mixOnly);
+        if (stems != null) ClipAudio.AddOutputs(args, stems, 1, mixOnly);
         args.AddRange(videoOptions);
         args.AddRange(["-movflags", "+faststart", "-f", "mp4", output]);
 

@@ -6,8 +6,8 @@ using NAudio.Wave;
 namespace Flashback.Core;
 
 /// <summary>
-/// Continuously captures one audio source (everything the PC plays, or a microphone) into an <see cref="AudioRing"/>.
-/// Recovers by itself when a device is unplugged, changes, or the default device is switched.
+/// Continuously captures one audio source (everything the PC plays, a microphone, or what one app plays) into an
+/// <see cref="AudioRing"/>. Recovers by itself when a device is unplugged, changes, or the default device is switched.
 /// </summary>
 public sealed unsafe class AudioSource
 {
@@ -15,6 +15,7 @@ public sealed unsafe class AudioSource
         unchecked((AudioClientStreamFlags)0x80000000) | unchecked((AudioClientStreamFlags)0x08000000);
 
     private readonly bool _loopback;
+    private readonly int _processId;
     private readonly string _label;
     private readonly AutoResetEvent _wake = new(false);
     private Thread? _thread;
@@ -31,6 +32,9 @@ public sealed unsafe class AudioSource
     private float[] _left = [], _right = [];
     private int _srcRate = AudioRing.SampleRate, _srcChannels = 2, _srcBits = 16;
     private bool _srcFloat, _direct;
+    private bool _resync;
+    private int _gapFrames;
+    private double _gapTime;
     private double _resamplePos;
     private float _prevL, _prevR;
 
@@ -45,6 +49,16 @@ public sealed unsafe class AudioSource
         _loopback = loopback;
         _label = loopback ? "Desktop audio" : "Microphone";
     }
+
+    /// <summary>Captures only what <paramref name="processId"/> and the programs it started play.</summary>
+    public AudioSource(int processId, string label)
+    {
+        _loopback = true;
+        _processId = processId;
+        _label = label;
+    }
+
+    public int ProcessId => _processId;
 
     /// <summary>Highest level since the last call, 0..1.</summary>
     public float TakePeak()
@@ -72,14 +86,15 @@ public sealed unsafe class AudioSource
         _thread.Start();
     }
 
-    public void Stop()
+    /// <param name="keepAudio">Keep what was captured so far, so a clip can still include it.</param>
+    public void Stop(bool keepAudio = false)
     {
         if (_thread == null) return;
         _stop = true;
         _wake.Set();
         _thread.Join(3000);
         _thread = null;
-        Ring.Clear();
+        if (!keepAudio) Ring.Clear();
     }
 
     private void Run()
@@ -90,7 +105,8 @@ public sealed unsafe class AudioSource
             try
             {
                 _reinit = false;
-                CaptureSession();
+                if (_processId > 0) CaptureProcess();
+                else CaptureSession();
                 _lastError = "";
             }
             catch (Exception ex)
@@ -195,6 +211,57 @@ public sealed unsafe class AudioSource
         }
     }
 
+    /// <summary>
+    /// Captures one app through process loopback. Windows converts to 48 kHz stereo 16-bit for us and delivers packets
+    /// all the time, near-silent ones while the app plays nothing; those become gaps (see <see cref="AddGap"/>).
+    /// </summary>
+    private void CaptureProcess()
+    {
+        AudioClient client = ProcessLoopback.Activate(_processId);
+        _resync = true;
+        _gapFrames = 0;
+        using var ready = new AutoResetEvent(false);
+        try
+        {
+            client.Initialize(AudioClientShareMode.Shared,
+                AudioClientStreamFlags.Loopback | AudioClientStreamFlags.EventCallback | AutoConvert,
+                2_000_000, 0, new WaveFormat(AudioRing.SampleRate, 16, 2), Guid.Empty);
+            client.SetEventHandle(ready.SafeWaitHandle.DangerousGetHandle());
+            _direct = true;
+            _srcRate = AudioRing.SampleRate;
+            _srcChannels = 2;
+            _srcBits = 16;
+            _srcFloat = false;
+            AudioCaptureClient capture = client.AudioCaptureClient;
+            client.Start();
+            _status = "OK";
+            _deviceName = _label;
+            if (_lastError.Length > 0) Log.Info($"App audio \"{_label}\" (process {_processId}): capturing");
+            while (!_stop && !_reinit)
+            {
+                ready.WaitOne(40);
+                while (capture.GetNextPacketSize() > 0)
+                {
+                    IntPtr buffer = capture.GetBuffer(out int frames, out AudioClientBufferFlags flags, out _, out long qpc);
+                    try
+                    {
+                        if (frames > 0 && (flags & AudioClientBufferFlags.Silent) == 0) Handle(buffer, frames, qpc);
+                        else if (frames > 0) AddGap(PacketTime(frames, qpc), frames);
+                    }
+                    finally
+                    {
+                        capture.ReleaseBuffer(frames);
+                    }
+                }
+            }
+            try { client.Stop(); } catch { }
+        }
+        finally
+        {
+            client.Dispose();
+        }
+    }
+
     private AudioClient Initialize(MMDevice device)
     {
         AudioClientStreamFlags baseFlags = _loopback ? AudioClientStreamFlags.Loopback : AudioClientStreamFlags.None;
@@ -246,14 +313,38 @@ public sealed unsafe class AudioSource
         }
     }
 
-    private void Handle(IntPtr buffer, int frames, long qpc100ns)
+    /// <summary>Wall-clock time of a packet's first frame. WASAPI reports it on the performance-counter clock.</summary>
+    private double PacketTime(int frames, long qpc100ns)
     {
-        // WASAPI reports when the first frame was captured, on the performance-counter clock.
         double now = Clock.UtcNow();
         double age = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency - qpc100ns / 1e7;
-        double time = qpc100ns > 0 && age > -0.005 && age < 2.0
+        return qpc100ns > 0 && age > -0.005 && age < 2.0
             ? now - Math.Max(age, 0)
             : now - frames / (double)_srcRate;
+    }
+
+    /// <summary>
+    /// App capture: silence is not stored but counted, and handed to the ring as a gap (at least once a second so
+    /// old audio can still be trimmed), so the next sound lands sample-exactly where it was played.
+    /// </summary>
+    private void AddGap(double time, int frames)
+    {
+        if (_gapFrames == 0) _gapTime = time;
+        _gapFrames += frames;
+        if (_gapFrames >= AudioRing.SampleRate) FlushGap();
+    }
+
+    private void FlushGap()
+    {
+        if (_gapFrames == 0) return;
+        Ring.AppendGap(_gapTime, _gapFrames, _resync);
+        _resync = false;
+        _gapFrames = 0;
+    }
+
+    private void Handle(IntPtr buffer, int frames, long qpc100ns)
+    {
+        double time = PacketTime(frames, qpc100ns);
 
         int outFrames = Convert(buffer, frames);
         if (outFrames <= 0) return;
@@ -268,6 +359,21 @@ public sealed unsafe class AudioSource
         float peak = max / 32768f;
         if (peak > _peak) _peak = peak;
 
+        if (_processId > 0)
+        {
+            // An app that plays nothing still delivers packets of +-1 noise. Keeping them would cost about 20 MB per
+            // idle app, so they are only counted. Placing the next sound by its own timestamp instead shifted it by a
+            // few milliseconds each time (enough to scramble speech between words in Discord).
+            if (max <= 2)
+            {
+                AddGap(time, outFrames);
+                return;
+            }
+            FlushGap();
+            Ring.Append(time, samples, _resync);
+            _resync = false;
+            return;
+        }
         Ring.Append(time, samples);
     }
 

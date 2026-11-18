@@ -6,7 +6,7 @@ namespace Flashback.Core;
 public sealed record EngineStatus(
     RecorderState State, string Detail, RecorderConfig? Config,
     bool DesktopEnabled, string DesktopStatus, string DesktopDevice,
-    bool MicEnabled, string MicStatus, string MicDevice, int BufferedSeconds);
+    bool MicEnabled, string MicStatus, string MicDevice, int BufferedSeconds, bool AppsEnabled);
 
 /// <summary>Owns the recorder, the audio capture and clip saving, and applies settings changes to them.</summary>
 public sealed class Engine : IDisposable
@@ -24,6 +24,7 @@ public sealed class Engine : IDisposable
     public VideoRecorder? Recorder { get; }
     public AudioSource Desktop { get; } = new(loopback: true);
     public AudioSource Mic { get; } = new(loopback: false);
+    public AppAudioCapture Apps { get; } = new();
     public ClipService? Clips { get; }
     public JobObject Job => _job;
 
@@ -45,7 +46,7 @@ public sealed class Engine : IDisposable
                 if (failures == 3 || failures % 40 == 0) _nvencOk = ProbeNvenc();
             },
         };
-        Clips = new ClipService(FfmpegPath, Recorder, Desktop, Mic, _job);
+        Clips = new ClipService(FfmpegPath, Recorder, Desktop, Mic, Apps, _job);
     }
 
     public void Start()
@@ -64,6 +65,7 @@ public sealed class Engine : IDisposable
         Mic.SetDevice(s.MicDeviceId);
         if (s.DesktopAudio) Desktop.Start();
         if (s.Microphone) Mic.Start();
+        if (s.DesktopAudio && s.SeparateAppAudio) Apps.Start();
         Recorder?.Start();
         Settings.Changed += OnSettingsChanged;
         // If the GPU encoder was unavailable (a driver update, for example), go back to it once it returns.
@@ -89,6 +91,7 @@ public sealed class Engine : IDisposable
         if (Recorder != null) Recorder.RetainSeconds = s.ClipSeconds + 15;
         Desktop.Ring.RetainSeconds = s.ClipSeconds + 20;
         Mic.Ring.RetainSeconds = s.ClipSeconds + 20;
+        Apps.RetainSeconds = s.ClipSeconds + 20;
     }
 
     private void OnSettingsChanged(AppSettings old, AppSettings now)
@@ -99,6 +102,10 @@ public sealed class Engine : IDisposable
 
             if (now.DesktopAudio && !Desktop.IsRunning) Desktop.Start();
             else if (!now.DesktopAudio && Desktop.IsRunning) Desktop.Stop();
+
+            bool apps = now.DesktopAudio && now.SeparateAppAudio;
+            if (apps && !Apps.IsRunning) Apps.Start();
+            else if (!apps && Apps.IsRunning) Apps.Stop();
 
             Mic.SetDevice(now.MicDeviceId);
             if (now.Microphone && !Mic.IsRunning) Mic.Start();
@@ -213,7 +220,7 @@ public sealed class Engine : IDisposable
         var (state, detail, cfg) = Recorder?.Status ?? (RecorderState.Error, "ffmpeg.exe is missing. Put it next to the app.", null);
         return new EngineStatus(state, detail, cfg,
             s.DesktopAudio, Desktop.Status, Desktop.DeviceName,
-            s.Microphone, Mic.Status, Mic.DeviceName, Recorder?.BufferedSeconds ?? 0);
+            s.Microphone, Mic.Status, Mic.DeviceName, Recorder?.BufferedSeconds ?? 0, Apps.IsRunning);
     }
 
     public void Dispose()
@@ -224,6 +231,7 @@ public sealed class Engine : IDisposable
         Recorder?.Stop();
         Desktop.Stop();
         Mic.Stop();
+        Apps.Stop();
         _job.Dispose();
     }
 }

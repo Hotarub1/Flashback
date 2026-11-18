@@ -378,6 +378,7 @@ public partial class MainWindow : Window
 
         CursorCheck.IsChecked = s.CaptureCursor;
         DesktopCheck.IsChecked = s.DesktopAudio;
+        AppsCheck.IsChecked = s.SeparateAppAudio;
         MicCheck.IsChecked = s.Microphone;
         FillMicDevices(s.MicDeviceId);
         MicVolumeSlider.Value = Math.Min(200, s.MicVolume);
@@ -489,6 +490,7 @@ public partial class MainWindow : Window
         if (MicDeviceBox.SelectedItem is ComboBoxItem mic) s.MicDeviceId = mic.Tag as string;
         s.CaptureCursor = CursorCheck.IsChecked == true;
         s.DesktopAudio = DesktopCheck.IsChecked == true;
+        s.SeparateAppAudio = AppsCheck.IsChecked == true;
         s.Microphone = MicCheck.IsChecked == true;
         s.MicVolume = (int)Math.Round(MicVolumeSlider.Value / 5) * 5;
         s.StartWithWindows = StartupCheck.IsChecked == true;
@@ -639,6 +641,15 @@ public partial class MainWindow : Window
             MicMeter.Value = st.MicEnabled ? _micLevel : 0;
             DesktopInfo.Text = !st.DesktopEnabled ? "" : st.DesktopStatus == "OK" ? st.DesktopDevice : st.DesktopStatus;
             MicInfo.Text = !st.MicEnabled ? "" : st.MicStatus == "OK" ? st.MicDevice : st.MicStatus;
+            AppsCheck.IsEnabled = st.DesktopEnabled && AppAudioCapture.Supported;
+            if (!AppAudioCapture.Supported) AppsInfo.Text = "Needs Windows 10 version 2004 or newer.";
+            else if (!st.DesktopEnabled || !s.SeparateAppAudio) AppsInfo.Text = "Clips get one track with all PC sound.";
+            else
+            {
+                List<string> heard = _engine.Apps.RecentlyHeard(30);
+                AppsInfo.Text = (heard.Count > 0 ? "Playing sound now: " + string.Join(", ", heard) + ". " : "")
+                                + "Each app that plays sound in a clip gets a volume slider in the player.";
+            }
 
             if (!_capturingHotkey)
             {

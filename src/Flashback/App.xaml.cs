@@ -297,7 +297,8 @@ public partial class App : Application
                 if (info != null && info.Seconds > 2.5)
                 {
                     string output = ClipLibrary.UniquePath(Path.GetDirectoryName(r.Path)!, Path.GetFileNameWithoutExtension(r.Path) + " (trimmed)");
-                    var request = new TrimRequest(r.Path, output, 1.0, info.Seconds - 1.0, 0.5f, 1.5f, info, _settings.Current.Quality);
+                    float[] gains = info.StemStreams.Select((_, i) => i % 2 == 0 ? 0.5f : 1.5f).ToArray();
+                    var request = new TrimRequest(r.Path, output, 1.0, info.Seconds - 1.0, gains, info, _settings.Current.Quality);
                     string? error = await Task.Run(() => ClipEditor.Export(ffmpeg, request, _engine.Job, null));
                     ClipInfo? trimmed = error == null ? await Task.Run(() => ClipAudio.Probe(ffmpeg, output, _engine.Job)) : null;
                     trim = new { Ok = error == null, Path = output, Error = error, Info = trimmed };
@@ -309,6 +310,7 @@ public partial class App : Application
                 RecorderState = before.State.ToString(), before.Detail, Config = before.Config?.Key, before.Config?.OutputIndex,
                 Desktop = new { before.DesktopStatus, before.DesktopDevice, _engine.Desktop.Ring.TotalPackets, _engine.Desktop.Ring.TotalFrames },
                 Mic = new { before.MicStatus, before.MicDevice, _engine.Mic.Ring.TotalPackets, _engine.Mic.Ring.TotalFrames },
+                Apps = _engine.Apps.Snapshot().Select(a => new { a.Name, a.Key, a.Ring.TotalPackets, a.Ring.TotalFrames }).ToList(),
                 Info = info,
                 Trim = trim,
             };
@@ -330,7 +332,12 @@ public partial class App : Application
         try
         {
             Directory.CreateDirectory(dir);
-            _window!.Show();
+            // Off screen and without focus, so a check never pulls the user out of a game.
+            _window!.ShowActivated = false;
+            _window.WindowStartupLocation = WindowStartupLocation.Manual;
+            _window.Left = SystemParameters.VirtualScreenLeft - 4000;
+            _window.Top = SystemParameters.VirtualScreenTop;
+            _window.Show();
             _window.PlayerSilent = true; // a diagnostic run must not play sound through the speakers
             await Task.Delay(2500);
             _window.RenderTo(Path.Combine(dir, "clips.png"));
@@ -341,6 +348,8 @@ public partial class App : Application
                 _window.RenderTo(Path.Combine(dir, "player.png"));
                 await Task.Delay(2000);
                 Log.Info("Player check: " + _window.PlayerDebug());
+                Log.Info("Scrub check: " + await _window.ScrubCheckAsync());
+                Log.Info("Volume check: " + _window.VolumeCheck());
                 _window.ClosePlayerForTest();
             }
             _window.ShowSettingsTab();
