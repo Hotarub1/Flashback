@@ -22,6 +22,16 @@ internal static class Win32
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
     public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int index, IntPtr value);
 
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetCurrentThread();
+
+    [DllImport("kernel32.dll")]
+    public static extern bool GetThreadTimes(IntPtr thread, out long creation, out long exit, out long kernel, out long user);
+
+    /// <summary>CPU time the calling thread has used so far, in 100 ns units.</summary>
+    public static long CurrentThreadCpu() =>
+        GetThreadTimes(GetCurrentThread(), out _, out _, out long kernel, out long user) ? kernel + user : 0;
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr CreateJobObject(IntPtr attributes, string? name);
 

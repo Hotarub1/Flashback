@@ -311,6 +311,7 @@ public partial class App : Application
                 Desktop = new { before.DesktopStatus, before.DesktopDevice, _engine.Desktop.Ring.TotalPackets, _engine.Desktop.Ring.TotalFrames },
                 Mic = new { before.MicStatus, before.MicDevice, _engine.Mic.Ring.TotalPackets, _engine.Mic.Ring.TotalFrames },
                 Apps = _engine.Apps.Snapshot().Select(a => new { a.Name, a.Key, a.Ring.TotalPackets, a.Ring.TotalFrames }).ToList(),
+                AppReopens = _engine.Apps.Reopens,
                 Info = info,
                 Trim = trim,
             };

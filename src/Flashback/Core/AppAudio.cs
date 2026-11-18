@@ -42,6 +42,8 @@ public sealed class AppAudioCapture
     private volatile bool _stop;
     private volatile int _retainSeconds = 50;
     private string _lastError = "";
+    /// <summary>The default output device at the last poll: "" when there was none, null before the first poll.</summary>
+    private string? _output;
 
     /// <summary>Process loopback exists from Windows 10 version 2004 (build 19041).</summary>
     public static bool Supported => OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041);
@@ -79,11 +81,21 @@ public sealed class AppAudioCapture
         _wake.Set();
         _thread.Join(5000);
         _thread = null;
+        _output = null;
         lock (_lock)
         {
             foreach (Tracked t in _active.Values) t.Source.Stop();
             _active.Clear();
             _retired.Clear();
+        }
+    }
+
+    /// <summary>How many times an app capture used too much CPU and was reopened, for diagnostics.</summary>
+    public int Reopens
+    {
+        get
+        {
+            lock (_lock) return _active.Values.Concat(_retired).Sum(t => t.Source.Reopens);
         }
     }
 
@@ -113,7 +125,11 @@ public sealed class AppAudioCapture
             try
             {
                 enumerator ??= new MMDeviceEnumerator();
-                Poll(enumerator);
+                using MMDevice? output = DefaultOutput(enumerator);
+                string id = output?.ID ?? "";
+                if (_output != null && id != _output) OnOutputChanged(_output, id);
+                _output = id;
+                if (output != null) Poll(output);
                 _lastError = "";
             }
             catch (Exception ex)
@@ -132,9 +148,59 @@ public sealed class AppAudioCapture
         enumerator?.Dispose();
     }
 
-    private void Poll(MMDeviceEnumerator enumerator)
+    /// <summary>The default output device, or null when the PC has none (the speakers or headphones were unplugged).</summary>
+    private static MMDevice? DefaultOutput(MMDeviceEnumerator enumerator)
     {
-        Dictionary<int, string> sessions = ListSessions(enumerator);
+        try
+        {
+            return enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+        }
+        catch (COMException ex) when ((uint)ex.HResult == 0x80070490)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Windows' per-app capture can get stuck when the output device goes away. After the user's only speakers were
+    /// unplugged for 25 minutes, three app captures each kept a CPU core busy copying memory, and stayed that way after
+    /// the speakers came back, until Flashback was restarted (a fresh capture of the same apps used almost nothing).
+    /// So app captures stop while there is no output device, which also means no app can play anything, and are
+    /// opened afresh when a device returns or the default device changes.
+    /// </summary>
+    internal void OnOutputChanged(string old, string now)
+    {
+        List<AudioSource> toStop = [];
+        lock (_lock)
+        {
+            if (now.Length == 0)
+            {
+                Log.Info($"App audio: no output device (unplugged?), pausing {_active.Count} app captures until one is back");
+                double time = Clock.UtcNow();
+                foreach (Tracked t in _active.Values)
+                {
+                    t.StoppedUtc = time;
+                    _retired.Add(t);
+                    toStop.Add(t.Source);
+                }
+                _active.Clear();
+            }
+            else if (old.Length == 0)
+            {
+                Log.Info("App audio: an output device is back, capturing apps again");
+            }
+            else
+            {
+                Log.Info($"App audio: the default output device changed, reopening {_active.Count} app captures");
+                foreach (Tracked t in _active.Values) t.Source.Reopen();
+            }
+        }
+        foreach (AudioSource s in toStop) s.Stop(keepAudio: true);
+    }
+
+    private void Poll(MMDevice output)
+    {
+        Dictionary<int, string> sessions = ListSessions(output);
         Dictionary<int, ProcessEntry> processes = ProcessEntry.Snapshot();
         var created = new Dictionary<int, long>();
         long Created(int pid)
@@ -214,10 +280,9 @@ public sealed class AppAudioCapture
     }
 
     /// <summary>Process id and display name of every audio session on the default output.</summary>
-    private static Dictionary<int, string> ListSessions(MMDeviceEnumerator enumerator)
+    private static Dictionary<int, string> ListSessions(MMDevice device)
     {
         var result = new Dictionary<int, string>();
-        using MMDevice device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
         SessionCollection sessions = device.AudioSessionManager.Sessions;
         for (int i = 0; i < sessions.Count; i++)
         {

@@ -14,6 +14,10 @@ public sealed unsafe class AudioSource
     private static readonly AudioClientStreamFlags AutoConvert =
         unchecked((AudioClientStreamFlags)0x80000000) | unchecked((AudioClientStreamFlags)0x08000000);
 
+    /// <summary>How often an app capture checks its own CPU use, and the share of one core it may use.</summary>
+    internal static int CpuCheckMs = 5000;
+    internal static double MaxCpuShare = 0.15;
+
     private readonly bool _loopback;
     private readonly int _processId;
     private readonly string _label;
@@ -33,6 +37,7 @@ public sealed unsafe class AudioSource
     private int _srcRate = AudioRing.SampleRate, _srcChannels = 2, _srcBits = 16;
     private bool _srcFloat, _direct;
     private bool _resync;
+    private int _runaways;
     private int _gapFrames;
     private double _gapTime;
     private double _resamplePos;
@@ -59,6 +64,16 @@ public sealed unsafe class AudioSource
     }
 
     public int ProcessId => _processId;
+
+    /// <summary>How many times this capture used too much CPU and was reopened.</summary>
+    public int Reopens { get; private set; }
+
+    /// <summary>Closes the capture and opens it again, keeping what was captured so far.</summary>
+    public void Reopen()
+    {
+        _reinit = true;
+        _wake.Set();
+    }
 
     /// <summary>Highest level since the last call, 0..1.</summary>
     public float TakePeak()
@@ -125,7 +140,15 @@ public sealed unsafe class AudioSource
                 }
             }
             if (_stop) break;
-            _wake.WaitOne(_reinit ? 50 : 1500);
+            // A capture that used too much CPU is reopened at once; if it keeps doing so, less and less often
+            // (after 5 s, 10 s, ... up to a minute), so it can never keep a core busy.
+            int waitMs = _reinit ? 50 : _runaways switch
+            {
+                0 => 1500,
+                1 => 50,
+                _ => Math.Min(60_000, 5_000 << Math.Min(_runaways - 2, 4)),
+            };
+            _wake.WaitOne(waitMs);
         }
         _status = "Off";
         _deviceName = "";
@@ -237,6 +260,8 @@ public sealed unsafe class AudioSource
             _status = "OK";
             _deviceName = _label;
             if (_lastError.Length > 0) Log.Info($"App audio \"{_label}\" (process {_processId}): capturing");
+            long windowStart = Environment.TickCount64;
+            long cpuAtStart = Win32.CurrentThreadCpu();
             while (!_stop && !_reinit)
             {
                 ready.WaitOne(40);
@@ -253,6 +278,27 @@ public sealed unsafe class AudioSource
                         capture.ReleaseBuffer(frames);
                     }
                 }
+
+                // Windows' per-app capture can get stuck copying memory flat out inside GetBuffer: after the speakers
+                // were unplugged, three of them each used a whole CPU core, with no end, while still delivering normal
+                // audio. A fresh capture of the same app is fine, so a capture that uses far more CPU than the
+                // fraction of a percent it normally needs is closed and opened again.
+                long now = Environment.TickCount64;
+                if (now - windowStart < CpuCheckMs) continue;
+                long cpu = Win32.CurrentThreadCpu();
+                double share = (cpu - cpuAtStart) / 10_000.0 / (now - windowStart);
+                windowStart = now;
+                cpuAtStart = cpu;
+                if (share <= MaxCpuShare)
+                {
+                    _runaways = 0;
+                    continue;
+                }
+                _runaways++;
+                Reopens++;
+                Log.Warn($"App audio \"{_label}\" (process {_processId}): Windows' capture was using {share * 100:F0}% of a CPU core, reopening it" +
+                         (_runaways > 1 ? $" (again, {_runaways} times in a row)" : ""));
+                break;
             }
             try { client.Stop(); } catch { }
         }
