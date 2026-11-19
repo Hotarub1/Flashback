@@ -105,4 +105,4 @@ In the player the video goes through WPF's MediaElement with its sound muted, wh
 | `--quit` | Ask the copy that is already running to exit |
 | `--data-dir <folder>` | Keep settings, buffer and logs in `<folder>` and skip the single-instance check (for testing) |
 | `--selftest <seconds>` | Record for that long, save one clip, save a trimmed copy of it, write `selftest.json` to the data folder, exit |
-| `--render-ui <folder>` | Save PNG images of the pages (including the player, muted) to `<folder>`, log the player's audio/video sync, a simulated drag of the playhead and a check of the volume controls, then exit. The window opens off screen and does not take focus |
+| `--render-ui <folder>` | Save PNG images of the pages (including the player, muted) to `<folder>`, check that only a full click opens a clip (not the release left over from double-clicking the title bar), log the player's audio/video sync, how well the seek bar lines up with the timeline, a simulated drag of the playhead and a check of the volume controls, then exit. The window opens off screen and does not take focus |

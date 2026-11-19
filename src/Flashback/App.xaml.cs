@@ -342,6 +342,7 @@ public partial class App : Application
             _window.PlayerSilent = true; // a diagnostic run must not play sound through the speakers
             await Task.Delay(2500);
             _window.RenderTo(Path.Combine(dir, "clips.png"));
+            Log.Info("Title bar check: " + _window.TitleBarCheck());
             if (_window.PlayFirstClip())
             {
                 await Task.Delay(3000);
@@ -349,6 +350,7 @@ public partial class App : Application
                 _window.RenderTo(Path.Combine(dir, "player.png"));
                 await Task.Delay(2000);
                 Log.Info("Player check: " + _window.PlayerDebug());
+                Log.Info("Align check: " + _window.AlignCheck());
                 Log.Info("Scrub check: " + await _window.ScrubCheckAsync());
                 Log.Info("Volume check: " + _window.VolumeCheck());
                 _window.ClosePlayerForTest();

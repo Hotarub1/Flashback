@@ -32,6 +32,8 @@ public partial class MainWindow
     /// do, which made dragging lag behind the mouse and stutter.
     /// </summary>
     private const int ScrubSeekIntervalMs = 90;
+    /// <summary>Width of the label column left of the timeline. The seek bar starts after the same width, so it lines up with the timeline.</summary>
+    public static readonly GridLength TrackLabelWidth = new(220);
     private static readonly Brush BarBackground = new SolidColorBrush(Color.FromRgb(0x0B, 0x0B, 0x0D));
     private static readonly Brush BarOverlay = new SolidColorBrush(Color.FromArgb(0xD0, 0x0B, 0x0B, 0x0D));
 
@@ -75,6 +77,7 @@ public partial class MainWindow
             if (_scrubPending && Environment.TickCount64 - _lastScrubSeek >= ScrubSeekIntervalMs) ApplyScrubSeek();
         };
         _volumeSave.Tick += (_, _) => SaveVolume();
+        SeekSlider.SizeChanged += (_, _) => AlignSeekSlider();
         VolumeSlider.Value = _engine.Settings.Current.PlayerVolume;
         _volumeReady = true;
         Timeline.SeekRequested += ScrubTo;
@@ -489,6 +492,23 @@ public partial class MainWindow
         SeekTo(Player.Position.TotalSeconds + frames / Fps);
     }
 
+    /// <summary>
+    /// A slider keeps its thumb inside its ends, so its first and last values sit half a thumb in from its edges, while
+    /// the timeline has them at its edges. Widening the slider by that much on each side puts every moment at the same
+    /// x on both, for the thumb and for a click.
+    /// </summary>
+    private void AlignSeekSlider()
+    {
+        if (SeekSlider.Template?.FindName("PART_Track", SeekSlider) is not Track { Thumb: { } thumb } track || thumb.DesiredSize.Width <= 0) return;
+        double half = thumb.DesiredSize.Width / 2; // the track lays the thumb out at its desired width
+        double trackLeft = track.TranslatePoint(new Point(0, 0), SeekSlider).X;
+        double trackRight = SeekSlider.ActualWidth - track.TranslatePoint(new Point(track.ActualWidth, 0), SeekSlider).X;
+        Thickness now = SeekSlider.Margin;
+        double left = -(trackLeft + half), right = -(trackRight + half); // the track's place inside the slider does not depend on the margin
+        if (Math.Abs(left - now.Left) > 0.25 || Math.Abs(right - now.Right) > 0.25)
+            SeekSlider.Margin = new Thickness(left, now.Top, right, now.Bottom);
+    }
+
     private void ShowPosition(double seconds)
     {
         _updatingSeek = true;
@@ -720,6 +740,11 @@ public partial class MainWindow
             TimelinePanel.Visibility = Visibility.Collapsed;
             TrimPanel.Visibility = Visibility.Collapsed;
             Grid.SetRow(ControlBar, 1);
+            // No timeline to line up with: the seek bar goes on top, across the whole width.
+            Grid.SetRow(SeekRow, 0);
+            Grid.SetRow(TransportRow, 1);
+            SeekRow.Margin = new Thickness(0, 0, 0, 6);
+            SeekLabelColumn.Width = GridLength.Auto;
             ControlBar.VerticalAlignment = VerticalAlignment.Bottom;
             ControlBar.Background = BarOverlay;
             Panel.SetZIndex(ControlBar, 2);
@@ -737,6 +762,10 @@ public partial class MainWindow
             TimelinePanel.Visibility = Visibility.Visible;
             TrimPanel.Visibility = Visibility.Visible;
             Grid.SetRow(ControlBar, 2);
+            Grid.SetRow(TransportRow, 0);
+            Grid.SetRow(SeekRow, 1);
+            SeekRow.Margin = new Thickness(0, 6, 0, 0);
+            SeekLabelColumn.Width = TrackLabelWidth;
             ControlBar.VerticalAlignment = VerticalAlignment.Stretch;
             ControlBar.Background = BarBackground;
             Panel.SetZIndex(ControlBar, 0);
@@ -858,6 +887,30 @@ public partial class MainWindow
     }
 
     public void ClosePlayerForTest() => ClosePlayer();
+
+    /// <summary>
+    /// Puts the playhead at a few places and reports how far apart the seek bar's thumb and the timeline's playhead
+    /// are drawn, and which time a click on the seek bar at the playhead's x would pick.
+    /// </summary>
+    public string AlignCheck()
+    {
+        double total = Timeline.Duration;
+        if (_playing == null || total <= 0 || SeekSlider.Template?.FindName("PART_Track", SeekSlider) is not Track { Thumb: { } thumb } track)
+            return "nothing to check";
+        var parts = new List<string>();
+        foreach (double fraction in new[] { 0, 0.25, 0.5, 0.75, 1 })
+        {
+            double t = total * fraction;
+            ShowPosition(t);
+            UpdateLayout();
+            double head = Timeline.TranslatePoint(new Point(t / total * Timeline.ActualWidth, 0), this).X;
+            double thumbCentre = thumb.TranslatePoint(new Point(thumb.ActualWidth / 2, 0), this).X;
+            double clicked = track.ValueFromPoint(TranslatePoint(new Point(head, 0), track));
+            parts.Add($"{t:F2}s thumb-playhead={thumbCentre - head:+0.0;-0.0;0.0}px click={clicked:F2}s");
+        }
+        ShowPosition(Player.Position.TotalSeconds);
+        return $"seek bar margin {SeekSlider.Margin.Left:0.#}/{SeekSlider.Margin.Right:0.#}, timeline {Timeline.ActualWidth:0} px: " + string.Join("; ", parts);
+    }
 
     /// <summary>Works the volume slider, mute and the volume keys the way a user would and reports what reaches the outputs.</summary>
     public string VolumeCheck()

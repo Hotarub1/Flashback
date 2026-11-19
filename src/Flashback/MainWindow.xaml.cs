@@ -205,9 +205,26 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// The tile the left button was pressed on. A tile opens its clip only when the button is both pressed and released
+    /// on it, like a button. Opening on the release alone also opened a clip after a double-click on the title bar:
+    /// Windows maximizes the window on the second press, the window grows under the mouse so a tile is now under it, and
+    /// the release that follows goes to the window and lands on that tile.
+    /// </summary>
+    private object? _pressedTile;
+
+    private void Tile_MouseLeftButtonDown(object sender, MouseButtonEventArgs e) => _pressedTile = sender;
+
+    private void Tile_MouseLeave(object sender, MouseEventArgs e)
+    {
+        if (_pressedTile == sender) _pressedTile = null;
+    }
+
     private void Tile_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
-        if ((sender as FrameworkElement)?.DataContext is ClipItem item) OpenPlayer(item);
+        bool pressedHere = _pressedTile == sender;
+        _pressedTile = null;
+        if (pressedHere && (sender as FrameworkElement)?.DataContext is ClipItem item) OpenPlayer(item);
     }
 
     private static ClipItem? MenuTarget(object sender) =>
@@ -702,6 +719,47 @@ public partial class MainWindow : Window
     // ================================================================ diagnostics
 
     public void ShowSettingsTab() => Tabs.SelectedItem = SettingsTab;
+
+    /// <summary>
+    /// Gives the first clip's tile the mouse events it gets after a double-click on the title bar has maximized the
+    /// window (a release without a press: the press went to the title bar), then a normal click, then a press that
+    /// leaves the tile before the release. Reports which of them opened the clip.
+    /// </summary>
+    public string TitleBarCheck()
+    {
+        if (ClipList.ItemContainerGenerator.ContainerFromIndex(0) is not DependencyObject container || FindTile(container) is not { } tile)
+            return "no clip to check";
+
+        bool Opens(params RoutedEvent[] events)
+        {
+            foreach (RoutedEvent routed in events)
+            {
+                tile.RaiseEvent(routed == MouseLeaveEvent
+                    ? new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = routed }
+                    : new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left) { RoutedEvent = routed });
+            }
+            bool opened = _playing != null;
+            if (opened) ClosePlayer();
+            return opened;
+        }
+
+        bool release = Opens(MouseLeftButtonUpEvent);
+        bool click = Opens(MouseLeftButtonDownEvent, MouseLeftButtonUpEvent);
+        bool dragOff = Opens(MouseLeftButtonDownEvent, MouseLeaveEvent, MouseLeftButtonUpEvent);
+        return $"release left over from a title-bar double-click opened the clip: {(release ? "YES (wrong)" : "no")}; " +
+               $"a click opened it: {(click ? "yes" : "NO (wrong)")}; a press that left the tile opened it: {(dragOff ? "YES (wrong)" : "no")}";
+    }
+
+    private static FrameworkElement? FindTile(DependencyObject parent)
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            DependencyObject child = VisualTreeHelper.GetChild(parent, i);
+            if (child is Border { ContextMenu: not null, DataContext: ClipItem } tile) return tile;
+            if (FindTile(child) is { } found) return found;
+        }
+        return null;
+    }
 
     public void RenderTo(string file)
     {

@@ -98,6 +98,7 @@
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <Border Style="{StaticResource Tile}" Width="262" ContextMenu="{StaticResource ClipMenu}"
+                                        MouseLeftButtonDown="Tile_MouseLeftButtonDown" MouseLeave="Tile_MouseLeave"
                                         MouseLeftButtonUp="Tile_MouseLeftButtonUp" ToolTip="{Binding Name}">
                                     <StackPanel>
                                         <Grid Height="147" Background="#0B0B0D">
@@ -360,67 +361,85 @@
                            TextAlignment="Center" Visibility="Collapsed"/>
             </Grid>
 
-            <!-- Transport bar. In full screen it floats over the bottom of the video and hides when the mouse rests. -->
+            <!-- Transport bar: the buttons, then the seek bar right above the timeline, starting and ending where the
+                 timeline does so both show the same moment at the same place. In full screen the bar floats over the
+                 bottom of the video with the seek bar on top across the whole width, and hides when the mouse rests. -->
             <Border x:Name="ControlBar" Grid.Row="2" Padding="20,10,20,8" Background="#FF0B0B0D">
                 <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <StackPanel Orientation="Horizontal">
-                        <Button Width="36" Height="32" Padding="0" Click="ToStart_Click" ToolTip="Start (Home)">
-                            <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE892;" FontSize="13"/>
-                        </Button>
-                        <Button Width="36" Height="32" Padding="0" Margin="4,0,0,0" Click="FrameBack_Click" ToolTip="One frame back (comma)">
-                            <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE76B;" FontSize="13"/>
-                        </Button>
-                        <Button x:Name="PlayPauseButton" Width="44" Height="32" Padding="0" Margin="4,0,0,0" Click="PlayPause_Click" ToolTip="Play / pause (Space)">
-                            <TextBlock x:Name="PlayPauseGlyph" FontFamily="{StaticResource Icons}" Text="&#xE769;" FontSize="14"/>
-                        </Button>
-                        <Button Width="36" Height="32" Padding="0" Margin="4,0,0,0" Click="FrameForward_Click" ToolTip="One frame forward (period)">
-                            <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE76C;" FontSize="13"/>
-                        </Button>
-                        <Button Width="36" Height="32" Padding="0" Margin="4,0,0,0" Click="ToEnd_Click" ToolTip="End (End)">
-                            <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE893;" FontSize="13"/>
-                        </Button>
-                    </StackPanel>
-                    <TextBlock x:Name="PlayerTime" Grid.Column="1" Foreground="{StaticResource TextPrimary}" FontSize="12" VerticalAlignment="Center" Margin="14,0,10,0" Text="0:00"/>
-                    <Slider x:Name="SeekSlider" Grid.Column="2" Minimum="0" Maximum="1" VerticalAlignment="Center" IsMoveToPointEnabled="True"
-                            Thumb.DragStarted="Seek_DragStarted" Thumb.DragCompleted="Seek_DragCompleted" ValueChanged="Seek_ValueChanged"/>
-                    <TextBlock x:Name="PlayerTotal" Grid.Column="3" Foreground="{StaticResource TextMuted}" FontSize="12" VerticalAlignment="Center" Margin="10,0,14,0" Text="0:00"/>
-                    <StackPanel Grid.Column="4" Orientation="Horizontal">
-                        <Button x:Name="MuteButton" Width="36" Height="32" Padding="0" Click="Mute_Click" ToolTip="Mute (M)">
-                            <TextBlock x:Name="MuteGlyph" FontFamily="{StaticResource Icons}" Text="&#xE995;" FontSize="13"/>
-                        </Button>
-                        <!-- Listening volume for the whole clip. The per-track sliders below set what a saved trim contains. -->
-                        <Slider x:Name="VolumeSlider" Width="96" Minimum="0" Maximum="100" Value="100" SmallChange="5" LargeChange="10"
-                                VerticalAlignment="Center" Margin="6,0,6,0" IsMoveToPointEnabled="True" Focusable="False"
-                                ValueChanged="Volume_ValueChanged" PreviewMouseWheel="Volume_MouseWheel"
-                                ToolTip="Volume (Up / Down, or the mouse wheel). Saved trims are not affected."/>
-                        <Button x:Name="FullscreenButton" Width="36" Height="32" Padding="0" Margin="4,0,0,0" Click="Fullscreen_Click" ToolTip="Full screen (F)">
-                            <TextBlock x:Name="FullscreenGlyph" FontFamily="{StaticResource Icons}" Text="&#xE740;" FontSize="13"/>
-                        </Button>
-                    </StackPanel>
-                    <StackPanel x:Name="TrimPanel" Grid.Column="5" Orientation="Horizontal" Margin="16,0,0,0">
-                        <ProgressBar x:Name="ExportProgress" Width="110" Height="6" Minimum="0" Maximum="1" VerticalAlignment="Center" Margin="0,0,12,0" Visibility="Collapsed"/>
-                        <Button x:Name="SaveTrimButton" Style="{StaticResource PrimaryButton}" Padding="14,6" Click="SaveTrim_Click">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE8C6;" VerticalAlignment="Center" Margin="0,1,8,0"/>
-                                <TextBlock Text="Save trim"/>
-                            </StackPanel>
-                        </Button>
-                    </StackPanel>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Grid x:Name="TransportRow">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Orientation="Horizontal">
+                            <Button Width="36" Height="32" Padding="0" Click="ToStart_Click" ToolTip="Start (Home)">
+                                <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE892;" FontSize="13"/>
+                            </Button>
+                            <Button Width="36" Height="32" Padding="0" Margin="4,0,0,0" Click="FrameBack_Click" ToolTip="One frame back (comma)">
+                                <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE76B;" FontSize="13"/>
+                            </Button>
+                            <Button x:Name="PlayPauseButton" Width="44" Height="32" Padding="0" Margin="4,0,0,0" Click="PlayPause_Click" ToolTip="Play / pause (Space)">
+                                <TextBlock x:Name="PlayPauseGlyph" FontFamily="{StaticResource Icons}" Text="&#xE769;" FontSize="14"/>
+                            </Button>
+                            <Button Width="36" Height="32" Padding="0" Margin="4,0,0,0" Click="FrameForward_Click" ToolTip="One frame forward (period)">
+                                <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE76C;" FontSize="13"/>
+                            </Button>
+                            <Button Width="36" Height="32" Padding="0" Margin="4,0,0,0" Click="ToEnd_Click" ToolTip="End (End)">
+                                <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE893;" FontSize="13"/>
+                            </Button>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Orientation="Horizontal">
+                            <Button x:Name="MuteButton" Width="36" Height="32" Padding="0" Click="Mute_Click" ToolTip="Mute (M)">
+                                <TextBlock x:Name="MuteGlyph" FontFamily="{StaticResource Icons}" Text="&#xE995;" FontSize="13"/>
+                            </Button>
+                            <!-- Listening volume for the whole clip. The per-track sliders below set what a saved trim contains. -->
+                            <Slider x:Name="VolumeSlider" Width="96" Minimum="0" Maximum="100" Value="100" SmallChange="5" LargeChange="10"
+                                    VerticalAlignment="Center" Margin="6,0,6,0" IsMoveToPointEnabled="True" Focusable="False"
+                                    ValueChanged="Volume_ValueChanged" PreviewMouseWheel="Volume_MouseWheel"
+                                    ToolTip="Volume (Up / Down, or the mouse wheel). Saved trims are not affected."/>
+                            <Button x:Name="FullscreenButton" Width="36" Height="32" Padding="0" Margin="4,0,0,0" Click="Fullscreen_Click" ToolTip="Full screen (F)">
+                                <TextBlock x:Name="FullscreenGlyph" FontFamily="{StaticResource Icons}" Text="&#xE740;" FontSize="13"/>
+                            </Button>
+                        </StackPanel>
+                        <StackPanel x:Name="TrimPanel" Grid.Column="3" Orientation="Horizontal" Margin="16,0,0,0">
+                            <ProgressBar x:Name="ExportProgress" Width="110" Height="6" Minimum="0" Maximum="1" VerticalAlignment="Center" Margin="0,0,12,0" Visibility="Collapsed"/>
+                            <Button x:Name="SaveTrimButton" Style="{StaticResource PrimaryButton}" Padding="14,6" Click="SaveTrim_Click">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock FontFamily="{StaticResource Icons}" Text="&#xE8C6;" VerticalAlignment="Center" Margin="0,1,8,0"/>
+                                    <TextBlock Text="Save trim"/>
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- The time sits in the timeline's label column; the seek bar spans the timeline's own column. -->
+                    <Grid x:Name="SeekRow" Grid.Row="1" Margin="0,6,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition x:Name="SeekLabelColumn" Width="{x:Static local:MainWindow.TrackLabelWidth}"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,18,0">
+                            <TextBlock x:Name="PlayerTime" Foreground="{StaticResource TextPrimary}" FontSize="12" Text="0:00"/>
+                            <TextBlock Foreground="{StaticResource TextMuted}" FontSize="12" Text=" / "/>
+                            <TextBlock x:Name="PlayerTotal" Foreground="{StaticResource TextMuted}" FontSize="12" Text="0:00"/>
+                        </StackPanel>
+                        <!-- Its margin is set in code: widened by half a thumb at each end, so 0:00 and the end are where the timeline has them. -->
+                        <Slider x:Name="SeekSlider" Grid.Column="1" Minimum="0" Maximum="1" VerticalAlignment="Center" IsMoveToPointEnabled="True"
+                                Thumb.DragStarted="Seek_DragStarted" Thumb.DragCompleted="Seek_DragCompleted" ValueChanged="Seek_ValueChanged"/>
+                    </Grid>
                 </Grid>
             </Border>
 
             <!-- Timeline: volume per track on the left, the ruler, video bar and waveforms on the right. Row heights match the control. -->
             <Grid x:Name="TimelinePanel" Grid.Row="3" Margin="20,2,20,14">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="220"/>
+                    <ColumnDefinition Width="{x:Static local:MainWindow.TrackLabelWidth}"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
                 <StackPanel Margin="0,0,10,0">
