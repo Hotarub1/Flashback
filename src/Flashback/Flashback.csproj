@@ -36,6 +36,8 @@
   <ItemGroup>
     <Resource Include="Assets\icon.ico" />
     <Resource Include="Assets\logo.png" />
+    <!-- Chakra Petch, Zen Old Mincho (cut down to Latin and the few Japanese characters shown) and Azeret Mono; SIL Open Font License, see Assets\Fonts\OFL-*.txt -->
+    <Resource Include="Assets\Fonts\*.ttf" />
   </ItemGroup>
 
 </Project>

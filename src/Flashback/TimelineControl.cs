@@ -10,19 +10,19 @@ namespace Flashback;
 public sealed record TimelineTrack(string Name, Color Color, float[] Peaks);
 
 /// <summary>
-/// The editing strip under the video: a time ruler, the video bar with the trim handles, and a waveform per audio
-/// track. Clicking or dragging on the ruler or a waveform moves the playhead; dragging a handle on the video bar
+/// The editing strip under the video: a time ruler, the video bar (a strip of frames from the clip) with the trim
+/// handles, and a waveform per audio track. Clicking or dragging on the ruler or a waveform moves the playhead; dragging a handle on the video bar
 /// changes the trimmed range. The ruler and the waveforms are drawn once per size and reused, so moving the playhead
 /// (many times a second while scrubbing) only redraws the cheap parts.
 /// </summary>
 public sealed class TimelineControl : FrameworkElement
 {
-    public const double RulerHeight = 24;
-    public const double VideoHeight = 34;
-    public const double TrackHeight = 52;
+    public const double RulerHeight = 14;
+    public const double VideoHeight = 30;
+    public const double TrackHeight = 34;
     /// <summary>Row height once there are more tracks than fit comfortably at <see cref="TrackHeight"/>.</summary>
-    public const double CompactTrackHeight = 42;
-    public const double RowGap = 4;
+    public const double CompactTrackHeight = 28;
+    public const double RowGap = 5;
     private const double HandleWidth = 8;
     private const double MinTrimSeconds = 0.5;
 
@@ -35,18 +35,21 @@ public sealed class TimelineControl : FrameworkElement
     public static readonly DependencyProperty TrimEndProperty = DependencyProperty.Register(nameof(TrimEnd), typeof(double), typeof(TimelineControl),
         new FrameworkPropertyMetadata(0.0, FrameworkPropertyMetadataOptions.AffectsRender));
 
-    private static readonly Brush RowBrush = Frozen(new SolidColorBrush(Color.FromRgb(0x1A, 0x1A, 0x1F)));
-    private static readonly Brush RulerText = Frozen(new SolidColorBrush(Color.FromRgb(0x9A, 0x9A, 0xA6)));
-    private static readonly Pen TickPen = FrozenPen(Color.FromRgb(0x3A, 0x3A, 0x44), 1);
-    private static readonly Pen MinorTickPen = FrozenPen(Color.FromRgb(0x2A, 0x2A, 0x32), 1);
-    private static readonly Pen PlayheadPen = FrozenPen(Colors.White, 2);
-    private static readonly Brush PlayheadBrush = Brushes.White;
-    private static readonly Brush HandleBrush = Frozen(new SolidColorBrush(Color.FromRgb(0x2D, 0xD4, 0xBF)));
-    private static readonly Brush SelectionBrush = Frozen(new SolidColorBrush(Color.FromArgb(0x16, 0xFF, 0xFF, 0xFF)));
-    private static readonly Pen SelectionPen = FrozenPen(Color.FromRgb(0x2D, 0xD4, 0xBF), 1.5);
-    private static readonly Brush VideoBrush = Frozen(new SolidColorBrush(Color.FromRgb(0x22, 0x22, 0x29)));
-    private static readonly Brush HatchBrush = MakeHatch();
-    private static readonly Typeface Font = new("Segoe UI");
+    // Espresso shades, a Beige trim range and a White playhead.
+    private static readonly Brush RowBrush = Frozen(new SolidColorBrush(Color.FromRgb(0x3A, 0x2B, 0x26)));
+    private static readonly Brush RulerText = Frozen(new SolidColorBrush(Color.FromRgb(0xDC, 0xC7, 0xAA)));
+    private static readonly Pen TickPen = FrozenPen(Color.FromArgb(0x70, 0xF5, 0xE6, 0xCA), 1);
+    private static readonly Pen MinorTickPen = FrozenPen(Color.FromArgb(0x38, 0xF5, 0xE6, 0xCA), 1);
+    private static readonly Pen PlayheadPen = FrozenPen(Color.FromRgb(0xFF, 0xFC, 0xF7), 1.5);
+    private static readonly Brush PlayheadBrush = Frozen(new SolidColorBrush(Color.FromRgb(0xFF, 0xFC, 0xF7)));
+    private static readonly Brush HandleBrush = Frozen(new SolidColorBrush(Color.FromRgb(0xDC, 0xC7, 0xAA)));
+    private static readonly Brush SelectionBrush = Frozen(new SolidColorBrush(Color.FromArgb(0x0C, 0xFF, 0xFC, 0xF7)));
+    private static readonly Pen SelectionPen = FrozenPen(Color.FromRgb(0xDC, 0xC7, 0xAA), 1);
+    private static readonly Pen GripPen = FrozenPen(Color.FromArgb(0xA0, 0x4B, 0x38, 0x32), 1);
+    private static readonly Brush VideoBrush = Frozen(new SolidColorBrush(Color.FromRgb(0x3A, 0x2B, 0x26)));
+    /// <summary>Laid over the parts of the video bar outside the kept range.</summary>
+    private static readonly Brush OutsideBrush = Frozen(new SolidColorBrush(Color.FromArgb(0xB8, 0x3A, 0x2B, 0x26)));
+    private static readonly Typeface Font = new((FontFamily)Application.Current.FindResource("MonoFont"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
 
     private readonly List<TimelineTrack> _tracks = new();
     private readonly Dictionary<TimelineTrack, (Brush Bright, Brush Dim)> _brushes = new();
@@ -56,6 +59,8 @@ public sealed class TimelineControl : FrameworkElement
     private (double Width, double Duration) _rulerKey;
     private enum Drag { None, Playhead, Start, End }
     private Drag _drag;
+    private ImageSource? _filmstrip;
+    private Brush? _filmstripBrush;
 
     public TimelineControl()
     {
@@ -75,6 +80,24 @@ public sealed class TimelineControl : FrameworkElement
     public event Action? TrimChanged;
 
     public bool IsTrimmed => Duration > 0 && (TrimStart > 0.01 || TrimEnd < Duration - 0.01);
+
+    /// <summary>Frames from across the clip, drawn in the video bar (cropped to its height, not squashed).</summary>
+    public ImageSource? Filmstrip
+    {
+        get => _filmstrip;
+        set
+        {
+            _filmstrip = value;
+            _filmstripBrush = null;
+            if (value != null)
+            {
+                var brush = new ImageBrush(value) { Stretch = Stretch.UniformToFill, AlignmentY = AlignmentY.Center, Opacity = 0.9 };
+                brush.Freeze();
+                _filmstripBrush = brush;
+            }
+            InvalidateVisual();
+        }
+    }
 
     /// <summary>Height of each audio row for this many tracks; the volume rows beside the timeline use the same.</summary>
     public static double TrackHeightFor(int tracks) => tracks > 3 ? CompactTrackHeight : TrackHeight;
@@ -112,9 +135,9 @@ public sealed class TimelineControl : FrameworkElement
         double w = ActualWidth, h = ActualHeight;
         dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, w, h));
         double videoTop = RulerHeight + RowGap, rowHeight = RowHeight;
-        dc.DrawRoundedRectangle(VideoBrush, null, new Rect(0, videoTop, w, VideoHeight), 4, 4);
+        dc.DrawRectangle(VideoBrush, null, new Rect(0, videoTop, w, VideoHeight));
         for (int i = 0; i < TrackRows; i++)
-            dc.DrawRoundedRectangle(RowBrush, null, new Rect(0, TrackTop(i), w, rowHeight), 4, 4);
+            dc.DrawRectangle(RowBrush, null, new Rect(0, TrackTop(i), w, rowHeight));
         if (Duration <= 0 || w < 10) return;
 
         double px = w / Duration;
@@ -130,9 +153,10 @@ public sealed class TimelineControl : FrameworkElement
         }
         dc.DrawDrawing(_ruler);
 
-        // Video bar: hatched outside the kept range, bracket handles at its ends.
-        if (xs > 0) dc.DrawRectangle(HatchBrush, null, new Rect(0, videoTop, xs, VideoHeight));
-        if (xe < w) dc.DrawRectangle(HatchBrush, null, new Rect(xe, videoTop, w - xe, VideoHeight));
+        // Video bar: the clip's frames, darkened outside the kept range, handles at its ends.
+        if (_filmstripBrush != null) dc.DrawRectangle(_filmstripBrush, null, new Rect(0, videoTop, w, VideoHeight));
+        if (xs > 0) dc.DrawRectangle(OutsideBrush, null, new Rect(0, videoTop, xs, VideoHeight));
+        if (xe < w) dc.DrawRectangle(OutsideBrush, null, new Rect(xe, videoTop, w - xe, VideoHeight));
         dc.DrawRectangle(null, SelectionPen, new Rect(xs + 0.75, videoTop + 0.75, Math.Max(0, xe - xs - 1.5), VideoHeight - 1.5));
         DrawHandle(dc, xs, videoTop, true);
         DrawHandle(dc, xe, videoTop, false);
@@ -162,20 +186,20 @@ public sealed class TimelineControl : FrameworkElement
         }
         if (loading)
         {
-            var text = Text("Loading audio…", 12, RulerText);
+            var text = Text("LOADING AUDIO", 10, RulerText);
             dc.DrawText(text, new Point(10, TrackTop(0) + (rowHeight - text.Height) / 2));
         }
 
         // Kept range shading across the audio rows, then the playhead over everything.
         dc.DrawRectangle(SelectionBrush, null, new Rect(xs, TrackTop(0), Math.Max(0, xe - xs), h - TrackTop(0)));
         double xp = Math.Round(Math.Clamp(Position, 0, Duration) * px) + 0.5;
-        dc.DrawLine(PlayheadPen, new Point(xp, RulerHeight - 6), new Point(xp, h));
+        dc.DrawLine(PlayheadPen, new Point(xp, 2), new Point(xp, h));
         var head = new StreamGeometry();
         using (StreamGeometryContext g = head.Open())
         {
-            g.BeginFigure(new Point(xp - 6, RulerHeight - 12), true, true);
-            g.LineTo(new Point(xp + 6, RulerHeight - 12), false, false);
-            g.LineTo(new Point(xp, RulerHeight - 4), false, false);
+            g.BeginFigure(new Point(xp - 5, 0), true, true);
+            g.LineTo(new Point(xp + 5, 0), false, false);
+            g.LineTo(new Point(xp, 7), false, false);
         }
         dc.DrawGeometry(PlayheadBrush, null, head);
     }
@@ -193,21 +217,16 @@ public sealed class TimelineControl : FrameworkElement
         {
             double x = Math.Round(t * px) + 0.5;
             bool major = Math.Abs(t / step - Math.Round(t / step)) < 1e-6;
-            dc.DrawLine(major ? TickPen : MinorTickPen, new Point(x, major ? RulerHeight - 8 : RulerHeight - 4), new Point(x, RulerHeight));
-            if (!major) continue;
-            var label = Text(FormatRuler(t), 11, RulerText);
-            double lx = t == 0 ? x + 3 : Math.Min(x - label.Width / 2, w - label.Width - 2);
-            if (lx + label.Width > w) continue;
-            dc.DrawText(label, new Point(lx, 0));
+            dc.DrawLine(major ? TickPen : MinorTickPen, new Point(x, major ? RulerHeight - 7 : RulerHeight - 3), new Point(x, RulerHeight));
         }
     }
 
     private static void DrawHandle(DrawingContext dc, double x, double top, bool left)
     {
         double hx = left ? x : x - HandleWidth;
-        dc.DrawRoundedRectangle(HandleBrush, null, new Rect(hx, top, HandleWidth, VideoHeight), 3, 3);
+        dc.DrawRectangle(HandleBrush, null, new Rect(hx, top, HandleWidth, VideoHeight));
         double gx = Math.Round(hx + HandleWidth / 2) + 0.5;
-        dc.DrawLine(new Pen(new SolidColorBrush(Color.FromArgb(0x90, 0, 0, 0)), 1), new Point(gx, top + 10), new Point(gx, top + VideoHeight - 10));
+        dc.DrawLine(GripPen, new Point(gx, top + 9), new Point(gx, top + VideoHeight - 9));
     }
 
     private static StreamGeometry WaveShape(float[] peaks, double w, double top, double height)
@@ -244,12 +263,6 @@ public sealed class TimelineControl : FrameworkElement
 
     private FormattedText Text(string s, double size, Brush brush) =>
         new(s, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight, Font, size, brush, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-
-    private static string FormatRuler(double seconds)
-    {
-        var t = TimeSpan.FromSeconds(seconds);
-        return t.TotalHours >= 1 ? t.ToString(@"h\:mm\:ss") : t.ToString(@"mm\:ss");
-    }
 
     // ---------------------------------------------------------------- mouse
 
@@ -348,22 +361,5 @@ public sealed class TimelineControl : FrameworkElement
         var p = new Pen(new SolidColorBrush(c), thickness);
         p.Freeze();
         return p;
-    }
-
-    private static Brush MakeHatch()
-    {
-        var line = new GeometryDrawing(null, new Pen(new SolidColorBrush(Color.FromArgb(0x50, 0xFF, 0xFF, 0xFF)), 1.5),
-            new LineGeometry(new Point(0, 8), new Point(8, 0)));
-        var brush = new DrawingBrush(line)
-        {
-            TileMode = TileMode.Tile,
-            Viewport = new Rect(0, 0, 8, 8),
-            ViewportUnits = BrushMappingMode.Absolute,
-            Viewbox = new Rect(0, 0, 8, 8),
-            ViewboxUnits = BrushMappingMode.Absolute,
-            Opacity = 0.6,
-        };
-        brush.Freeze();
-        return brush;
     }
 }

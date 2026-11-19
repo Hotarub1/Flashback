@@ -40,16 +40,34 @@ public partial class ToastWindow : Window
 
     public void ShowMessage(string title, string detail, bool isError)
     {
-        TitleText.Text = title;
+        TitleText.Text = title.ToUpperInvariant();
         DetailText.Text = detail;
         DetailText.Visibility = string.IsNullOrEmpty(detail) ? Visibility.Collapsed : Visibility.Visible;
-        Dot.Background = new SolidColorBrush(isError ? Color.FromRgb(0xF8, 0x71, 0x71) : Color.FromRgb(0xDB, 0x27, 0x77));
+        Dot.Background = new SolidColorBrush(isError ? Color.FromRgb(0xC4, 0x54, 0x3A) : Color.FromRgb(0xFF, 0xFC, 0xF7));
         BeginAnimation(OpacityProperty, null);
         Opacity = 1;
         _hide.Stop();
         Show();
         Reposition();
         _hide.Start();
+    }
+
+    /// <summary>Draws the notice to a PNG without showing it (for --render-ui; showing it would flash on the user's screen).</summary>
+    public void RenderPreview(string file)
+    {
+        TitleText.Text = "CLIP SAVED";
+        DetailText.Text = "90 seconds  ·  Clip 2026-11-18 17-22-41.mp4";
+        DetailText.Visibility = Visibility.Visible;
+        Panel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        Panel.Arrange(new Rect(Panel.DesiredSize));
+        Panel.UpdateLayout();
+        var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)Math.Ceiling(Panel.DesiredSize.Width), (int)Math.Ceiling(Panel.DesiredSize.Height),
+            96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(Panel);
+        var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+        encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+        using var fs = System.IO.File.Create(file);
+        encoder.Save(fs);
     }
 
     private void Reposition()

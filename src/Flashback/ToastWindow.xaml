@@ -6,13 +6,13 @@
         ShowInTaskbar="False" Topmost="True" ShowActivated="False" Focusable="False"
         IsHitTestVisible="False" ResizeMode="NoResize" SizeToContent="WidthAndHeight"
         WindowStartupLocation="Manual">
-    <Border x:Name="Panel" Margin="12" Padding="14,10,18,10" CornerRadius="10" Background="#F2141418"
-            BorderBrush="#33FFFFFF" BorderThickness="1" MinWidth="220" MaxWidth="420">
+    <Border x:Name="Panel" Margin="12" Padding="16,12,20,12" Background="#F24B3832" BorderBrush="#33F5E6CA" BorderThickness="1"
+            MinWidth="220" MaxWidth="420">
         <StackPanel Orientation="Horizontal">
-            <Border x:Name="Dot" Width="10" Height="10" CornerRadius="5" Background="#DB2777" VerticalAlignment="Center" Margin="0,0,12,0"/>
+            <Border x:Name="Dot" Width="8" Height="8" CornerRadius="4" Background="#FFFCF7" VerticalAlignment="Center" Margin="0,0,14,0"/>
             <StackPanel VerticalAlignment="Center">
-                <TextBlock x:Name="TitleText" Foreground="White" FontSize="14" FontWeight="SemiBold" FontFamily="Segoe UI"/>
-                <TextBlock x:Name="DetailText" Foreground="#B8B8C4" FontSize="12" FontFamily="Segoe UI" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                <TextBlock x:Name="TitleText" Foreground="#FFFCF7" FontSize="12" FontWeight="Bold" FontFamily="{StaticResource MonoFont}"/>
+                <TextBlock x:Name="DetailText" Foreground="#DCC7AA" FontSize="13" FontFamily="{StaticResource SerifFont}" TextTrimming="CharacterEllipsis" Margin="0,3,0,0"/>
             </StackPanel>
         </StackPanel>
     </Border>

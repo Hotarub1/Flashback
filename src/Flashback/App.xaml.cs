@@ -22,6 +22,7 @@ public partial class App : Application
     private DispatcherTimer? _hotkeyRetry;
     private bool _hotkeySuspended;
     private bool _exiting;
+    private Size? _renderSize;
 
     public bool HotkeyOk { get; private set; }
     public bool IsExiting => _exiting;
@@ -120,8 +121,12 @@ public partial class App : Application
             if (_settings.Current.StartWithWindows) AutoStart.Set(true); // keeps the path current if the app was moved
         }
 
-        _engine.Start();
+        // A UI render needs no recording: not starting the capture keeps it from competing with the copy the user runs.
+        if (renderUi == null) _engine.Start();
 
+        // --render-size WxH draws the window at that size, e.g. a maximized window on a large screen.
+        if (ArgValue(e.Args, "--render-size")?.Split('x') is [var w, var h] && double.TryParse(w, out double width) && double.TryParse(h, out double height))
+            _renderSize = new Size(width, height);
         if (renderUi != null) _ = RunRenderUi(renderUi);
         else if (selfTest != null) _ = RunSelfTest(selfTest);
         else if (!minimized) ShowMainWindow();
@@ -336,12 +341,25 @@ public partial class App : Application
             // Off screen and without focus, so a check never pulls the user out of a game.
             _window!.ShowActivated = false;
             _window.WindowStartupLocation = WindowStartupLocation.Manual;
-            _window.Left = SystemParameters.VirtualScreenLeft - 4000;
+            if (_renderSize is { } size)
+            {
+                _window.Width = size.Width;
+                _window.Height = size.Height;
+            }
+            _window.Left = SystemParameters.VirtualScreenLeft - _window.Width - 400;
             _window.Top = SystemParameters.VirtualScreenTop;
             _window.Show();
             _window.PlayerSilent = true; // a diagnostic run must not play sound through the speakers
             await Task.Delay(2500);
             _window.RenderTo(Path.Combine(dir, "clips.png"));
+            _window.ScrollClips(toEnd: true);
+            await Task.Delay(300);
+            _window.RenderTo(Path.Combine(dir, "clips-end.png"));
+            _window.ScrollClips(toEnd: false);
+            Log.Info("Chrome check: " + _window.ChromeCheck());
+            Log.Info("Caption check: " + _window.CaptionCheck());
+            Log.Info("Layout check: " + _window.LayoutCheck());
+            Log.Info("Band check: " + Flashback.MainWindow.BandCheck());
             Log.Info("Title bar check: " + _window.TitleBarCheck());
             if (_window.PlayFirstClip())
             {
@@ -354,11 +372,17 @@ public partial class App : Application
                 Log.Info("Scrub check: " + await _window.ScrubCheckAsync());
                 Log.Info("Volume check: " + _window.VolumeCheck());
                 _window.ClosePlayerForTest();
+                Log.Info("Still check: " + await _window.StillCheckAsync());
             }
             _window.ShowSettingsTab();
-            _window.Height = 1330;
-            await Task.Delay(1000);
-            _window.RenderTo(Path.Combine(dir, "settings.png"));
+            for (int section = 0; section < 4; section++)
+            {
+                _window.ShowSettingsSection(section);
+                await Task.Delay(section == 0 ? 1000 : 400);
+                if (section == 0) Log.Info("Settings check: " + _window.SettingsCheck());
+                _window.RenderTo(Path.Combine(dir, $"settings-{section + 1}.png"));
+            }
+            _toast?.RenderPreview(Path.Combine(dir, "toast.png"));
         }
         catch (Exception ex)
         {

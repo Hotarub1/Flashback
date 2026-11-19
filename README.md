@@ -10,7 +10,7 @@ Created in [T3 Code](https://t3.codes).
 
 1. Run `dist\Flashback.exe`. It starts recording straight away and keeps running in the tray when you close the window.
 2. Press **Ctrl+Shift+F9** (or the **Save clip** button) to save the last 30 seconds to `Videos\Clips`.
-3. The **Clips** tab shows your clips. Click one to play it; right-click to rename it, delete it, or show it in its folder.
+3. **Clips** shows your newest clip at the top (**Latest**), uncropped and sized to the window, then the rest in a band per day with that day's number of clips. Days in the same week with only a few clips each share a band (two days, or three on a big window, when their clips fit in one row; weeks start on the day set in Windows), listed newest first, their clips shown together as in any band. On a big window Latest also shows twelve stills from across the clip; click one to play from that moment. Click a clip to play it; right-click to rename it, delete it, or show it in its folder. Clips that still have the name they were saved with are shown by time ("Today, 5:22 PM"). **Folder** in the header opens the clips folder.
 
 To exit, right-click the tray icon and choose **Exit**.
 
@@ -19,9 +19,10 @@ To exit, right-click the tray icon and choose **Exit**.
 Clips carry each app's sound and your microphone as separate tracks (plus a mix of everything that other players use). Every app that played sound during the clip gets its own track, so Discord can be turned down while the game stays as it was. The player lets you work with them:
 
 - **Volume.** The slider next to the speaker button sets how loud the whole clip plays, and is remembered for the next clip. It only changes what you hear, not what a saved trim contains. Mute with the speaker button or **M**; moving the volume unmutes.
-- **Volume per track.** The sliders under the video set how loud each app and the microphone are while you watch. They go up to 200% so a quiet microphone can be lifted. A clip where only one app made sound, or where the app tracks did not account for all the PC's sound (see below), has one **Desktop audio** track instead. Older clips show the tracks they were saved with.
-- **Trim.** Drag the handles at the ends of the video bar to choose the part to keep. Playback stops at the end of the kept part. **Save trim** writes a new clip (`<name> (trimmed).mp4`) with that part and the volumes you set, and keeps the original. The new clip has the same tracks, so it can be trimmed again. Saving is near-instant when the trim starts at the beginning; otherwise the video is re-encoded on the GPU, which takes a few seconds per minute of clip.
+- **Volume per track.** The sliders beside the timeline set how loud each app and the microphone are while you watch. They go up to 200% so a quiet microphone can be lifted. A clip where only one app made sound, or where the app tracks did not account for all the PC's sound (see below), has one **Desktop audio** track instead. Older clips show the tracks they were saved with.
+- **Trim.** Drag the handles at the ends of the video bar (a strip of frames from the clip) to choose the part to keep. Playback stops at the end of the kept part. **Save trim** writes a new clip (`<name> (trimmed).mp4`) with that part and the volumes you set, and keeps the original. The new clip has the same tracks, so it can be trimmed again. Saving is near-instant when the trim starts at the beginning; otherwise the video is re-encoded on the GPU, which takes a few seconds per minute of clip.
 - **Full screen.** The ⛶ button, double-clicking the video or **F**. The controls hide when the mouse rests. **Esc** goes back.
+- **Back to the clips.** **Clips** in the header, or **Esc**.
 
 | Key | Action |
 |---|---|
@@ -36,6 +37,8 @@ Clips carry each app's sound and your microphone as separate tracks (plus a mix 
 | Esc | Leave full screen, or close the player |
 
 ## Settings
+
+Settings has four sections: Recording, Video, Audio and General. A big window (a maximized one on a 1080p or larger screen) shows all four at once; a smaller one shows one at a time, chosen on the left.
 
 | Setting | What it does | Default |
 |---|---|---|
@@ -65,7 +68,7 @@ Clips carry each app's sound and your microphone as separate tracks (plus a mix 
 - **App tracks never drop a sound.** The mix in every clip is the full desktop capture, not the sum of the app tracks. When a clip is saved, the app tracks are checked against the desktop capture; if they do not account for it (an app Windows would not let Flashback capture, for example), the clip gets one desktop track instead and the log says why.
 - **Hotkey conflicts are visible.** If another program holds the hotkey, Settings says so, and the app keeps trying to claim it.
 
-The status bar at the bottom of the window shows whether recording and both audio sources are working. Details go to the log (Settings, **Open log folder**).
+The bar at the bottom of the window shows whether recording is working and when the full clip length is ready; desktop audio and the microphone appear there only when something is wrong with them. The stamp at the bottom of the side rail (録, "record") is solid while recording and an outline otherwise. Details go to the log (Settings, General, **Open log folder**).
 
 ## Limits
 
@@ -91,7 +94,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 This needs the .NET 10 SDK. It publishes a self-contained app to `dist` and puts FFmpeg next to it, downloading FFmpeg into `tools\ffmpeg` first if it is missing. Always build with this script: running `dotnet publish` twice into the same folder deletes the native DLLs the app needs.
 
-The app is C# and WPF. FFmpeg captures the screen (`ddagrab`) and encodes it on the GPU (`h264_nvenc`) into one-second segments. Audio is captured in the app through WASAPI and laid out against the video by wall-clock time when a clip is saved. A clip's audio is AAC tracks: the mix (the default track, what other players and Discord use: desktop audio plus the microphone), then one track per app (or one desktop track), then the microphone.
+The app is C# and WPF. Its typefaces are Chakra Petch, Zen Old Mincho (cut down to Latin and the few Japanese characters shown) and Azeret Mono, embedded in the app under the SIL Open Font License (`src\Flashback\Assets\Fonts\OFL-*.txt`). The header replaces the Windows title bar (WPF `WindowChrome`). FFmpeg captures the screen (`ddagrab`) and encodes it on the GPU (`h264_nvenc`) into one-second segments. Audio is captured in the app through WASAPI and laid out against the video by wall-clock time when a clip is saved. A clip's audio is AAC tracks: the mix (the default track, what other players and Discord use: desktop audio plus the microphone), then one track per app (or one desktop track), then the microphone.
 
 Each app is captured with Windows' process loopback (Windows 10 2004 or newer), for every app with an audio session on the default output device, as listed in the volume mixer. Windows captures a process together with the processes it started, so an app that started another app playing sound (Steam starting a game, a game launcher) gets no track of its own instead of a copy of the game; its sound stays in the mix. Processes of one app (Discord, Chrome) become one track. Apps that play nothing are not kept in memory: their silence is only counted, so the sound after it still lands sample-exactly in place. Per-app capture reaches the app later and at a different level than the desktop capture (about 20–40 ms later, differing by a few milliseconds from app to app, and 4.5 dB louder on the development PC, where the speaker driver's effects only touch the desktop path), so when a clip is saved each app's delay is measured by cross-correlation and the level by a least-squares fit against the desktop capture, which is the track that is in sync with the video. The app tracks are then shifted and scaled to match, so at 100% they add up to the mix. Flashback's own sound (a clip playing in its player, the hotkey sound) is captured too, only so that check can account for it; it never gets a track. Windows' per-app capture can get stuck after the output device goes away (seen with unplugged speakers: each stuck capture kept a CPU core busy until restarted), so app captures pause while there is no output device and start afresh when one returns or the default device changes, and any app capture that uses more than 15% of a core is reopened (the log says so).
 
@@ -105,4 +108,4 @@ In the player the video goes through WPF's MediaElement with its sound muted, wh
 | `--quit` | Ask the copy that is already running to exit |
 | `--data-dir <folder>` | Keep settings, buffer and logs in `<folder>` and skip the single-instance check (for testing) |
 | `--selftest <seconds>` | Record for that long, save one clip, save a trimmed copy of it, write `selftest.json` to the data folder, exit |
-| `--render-ui <folder>` | Save PNG images of the pages (including the player, muted) to `<folder>`, check that only a full click opens a clip (not the release left over from double-clicking the title bar), log the player's audio/video sync, how well the seek bar lines up with the timeline, a simulated drag of the playhead and a check of the volume controls, then exit. The window opens off screen and does not take focus |
+| `--render-ui <folder>` | Save PNG images of the pages (the clips, the player, muted, each Settings section and the on-screen notice) to `<folder>`, check that the header has replaced the Windows title bar, check that only a full click opens a clip (not the release left over from double-clicking the title bar), log the player's audio/video sync, how well the seek bar lines up with the timeline, a simulated drag of the playhead and a check of the volume controls, then exit. The window opens off screen and does not take focus |

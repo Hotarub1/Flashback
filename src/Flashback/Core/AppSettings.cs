@@ -79,10 +79,13 @@ public sealed class AppSettings
 
     public string HotkeyText => DescribeHotkey(HotkeyModifiers, HotkeyKey);
 
-    public static string DescribeHotkey(uint mods, uint vk)
+    public static string DescribeHotkey(uint mods, uint vk) => vk == 0 ? "None" : string.Join("+", HotkeyParts(mods, vk));
+
+    /// <summary>The keys of a hotkey, modifiers first, for showing as separate keys.</summary>
+    public static List<string> HotkeyParts(uint mods, uint vk)
     {
-        if (vk == 0) return "None";
         var parts = new List<string>();
+        if (vk == 0) return parts;
         if ((mods & 2) != 0) parts.Add("Ctrl");
         if ((mods & 1) != 0) parts.Add("Alt");
         if ((mods & 4) != 0) parts.Add("Shift");
@@ -118,7 +121,7 @@ public sealed class AppSettings
             _ => key.ToString(),
         };
         parts.Add(name);
-        return string.Join("+", parts);
+        return parts;
     }
 }
 

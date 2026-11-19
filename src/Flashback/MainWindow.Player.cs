@@ -18,12 +18,15 @@ public partial class MainWindow
 {
     /// <summary>Longer clips play with their mixed audio only: ten minutes of decoded tracks already take about 230 MB.</summary>
     private const int MaxStemSeconds = 600;
-    private static readonly Color MicColor = Color.FromRgb(0xF5, 0x9E, 0x0B);
-    /// <summary>Colours for desktop audio and the apps, in track order. The microphone keeps its own amber.</summary>
+    private static readonly Color MicColor = Color.FromRgb(0xF5, 0xE6, 0xCA);
+    /// <summary>
+    /// Colours for desktop audio and the apps, in track order: Beige, White, a light coffee, then more shades of the
+    /// palette. The microphone keeps Cream.
+    /// </summary>
     private static readonly Color[] TrackColors =
     [
-        Color.FromRgb(0x2D, 0xD4, 0xBF), Color.FromRgb(0x60, 0xA5, 0xFA), Color.FromRgb(0xA7, 0x8B, 0xFA), Color.FromRgb(0xF4, 0x72, 0xB6),
-        Color.FromRgb(0xA3, 0xE6, 0x35), Color.FromRgb(0xFB, 0x71, 0x85), Color.FromRgb(0x22, 0xD3, 0xEE), Color.FromRgb(0xFB, 0x92, 0x3C),
+        Color.FromRgb(0xDC, 0xC7, 0xAA), Color.FromRgb(0xFF, 0xFC, 0xF7), Color.FromRgb(0xA5, 0x7F, 0x60), Color.FromRgb(0xC9, 0xA2, 0x7E),
+        Color.FromRgb(0xE8, 0xD5, 0xB5), Color.FromRgb(0x8F, 0x6A, 0x50), Color.FromRgb(0xB8, 0x95, 0x76), Color.FromRgb(0xF0, 0xE3, 0xD0),
     ];
 
     /// <summary>
@@ -33,20 +36,21 @@ public partial class MainWindow
     /// </summary>
     private const int ScrubSeekIntervalMs = 90;
     /// <summary>Width of the label column left of the timeline. The seek bar starts after the same width, so it lines up with the timeline.</summary>
-    public static readonly GridLength TrackLabelWidth = new(220);
-    private static readonly Brush BarBackground = new SolidColorBrush(Color.FromRgb(0x0B, 0x0B, 0x0D));
-    private static readonly Brush BarOverlay = new SolidColorBrush(Color.FromArgb(0xD0, 0x0B, 0x0B, 0x0D));
+    public static readonly GridLength TrackLabelWidth = new(210);
+    private static readonly Brush BarOverlay = new SolidColorBrush(Color.FromArgb(0xE0, 0x4B, 0x38, 0x32));
 
     private readonly DispatcherTimer _playerTimer = new() { Interval = TimeSpan.FromMilliseconds(50) };
     private readonly DispatcherTimer _hideControls = new() { Interval = TimeSpan.FromSeconds(2.5) };
     private readonly DispatcherTimer _scrubTimer = new() { Interval = TimeSpan.FromMilliseconds(30) };
     /// <summary>Writes the volume to the settings once the slider has rested, not on every step of a drag.</summary>
     private readonly DispatcherTimer _volumeSave = new() { Interval = TimeSpan.FromSeconds(1) };
-    private readonly List<(Slider Slider, TextBlock Percent)> _trackControls = new();
+    private readonly List<Slider> _trackControls = new();
 
     private ClipItem? _playing;
     private bool _isPlaying, _dragging, _updatingSeek, _muted, _exporting, _fullscreen, _resettingEditor, _volumeReady;
     private int _openVersion;
+    /// <summary>Where the clip being opened starts playing, in seconds, once the video has opened.</summary>
+    private double _startAt;
     private ClipInfo? _info;
     private StemPlayer? _stemPlayer;
     private double _lastVideoPos = -1, _prevTickPos;
@@ -92,7 +96,8 @@ public partial class MainWindow
 
     // ================================================================ open and close
 
-    private void OpenPlayer(ClipItem item)
+    /// <summary>Opens a clip in the player and plays it, from <paramref name="startAt"/> seconds in.</summary>
+    private void OpenPlayer(ClipItem item, double startAt = 0)
     {
         if (!File.Exists(item.Path))
         {
@@ -102,7 +107,9 @@ public partial class MainWindow
         ClosePlayer();
         int version = ++_openVersion;
         _playing = item;
-        PlayerTitle.Text = item.Name;
+        _startAt = startAt;
+        PlayerTitle.Text = item.Title.ToUpperInvariant();
+        PlayerTitle.ToolTip = item.Name;
         PlayerError.Visibility = Visibility.Collapsed;
         PlayerOverlay.Visibility = Visibility.Visible;
         ResetEditor();
@@ -138,6 +145,7 @@ public partial class MainWindow
         _playerTimer.Stop();
         _scrubTimer.Stop();
         _scrubbing = _dragging = _scrubPending = false;
+        _startAt = 0;
         _openVersion++;
         if (_playing == null && PlayerOverlay.Visibility != Visibility.Visible) return;
         SetFullscreen(false);
@@ -155,6 +163,7 @@ public partial class MainWindow
         _isPlaying = false;
         PlayerOverlay.Visibility = Visibility.Collapsed;
         Timeline.SetTracks([]);
+        Timeline.Filmstrip = null;
     }
 
     private void ResetEditor()
@@ -165,6 +174,7 @@ public partial class MainWindow
         Timeline.Position = 0;
         Timeline.TrimStart = 0;
         Timeline.TrimEnd = 0;
+        Timeline.Filmstrip = null;
         BuildTrackRows([("Audio", TrackColors[0])]);
         _resettingEditor = false;
         SetAudioNote("");
@@ -194,6 +204,7 @@ public partial class MainWindow
             }
             _info = info;
             if (info.Seconds > 0) ApplyDuration(info.Seconds);
+            _ = LoadFilmstripAsync(item, info.Seconds, version);
             ShowTrackRows(info, loading: true);
             UpdateEditorButtons();
             if (info.AudioStreams == 0)
@@ -244,6 +255,21 @@ public partial class MainWindow
         }
     }
 
+    /// <summary>Puts frames from across the clip into the timeline's video bar.</summary>
+    private async Task LoadFilmstripAsync(ClipItem item, double seconds, int version)
+    {
+        if (_engine.FfmpegPath is not { } ffmpeg) return;
+        try
+        {
+            ImageSource? strip = await Task.Run(() => ClipLibrary.LoadFilmstrip(ffmpeg, item.Path, item.Key, seconds, _engine.Job));
+            if (version == _openVersion) Timeline.Filmstrip = strip;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Filmstrip error: " + ex.Message);
+        }
+    }
+
     /// <summary>
     /// Shows the clip's audio tracks: a volume row each beside the timeline (made once, when the clip has been read)
     /// and a waveform each in the timeline (once the audio is decoded; without <paramref name="stems"/> the rows stay
@@ -286,37 +312,35 @@ public partial class MainWindow
         TrackRows.Children.Clear();
         _trackControls.Clear();
         double height = TimelineControl.TrackHeightFor(rows.Count);
-        bool compact = height < TimelineControl.TrackHeight;
+        var mono = (FontFamily)FindResource("MonoFont");
+        var sliderStyle = (Style)FindResource("ThinSliderDark");
         foreach (var (label, color) in rows)
         {
-            var percent = new TextBlock { Foreground = (Brush)FindResource("TextMuted"), FontSize = 11, Text = "100%" };
-            DockPanel.SetDock(percent, Dock.Right);
+            // A hollow marker in the track's colour (the same as its waveform), its name, and its volume.
+            var marker = new System.Windows.Shapes.Ellipse
+            {
+                Width = 8, Height = 8, Stroke = new SolidColorBrush(color), StrokeThickness = 1.3,
+                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0),
+            };
             var name = new TextBlock
             {
-                Foreground = new SolidColorBrush(color), FontSize = 12, Text = label, TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = label,
+                Text = label.ToUpperInvariant(), FontFamily = mono, FontSize = 10, Foreground = _beige, Width = 92,
+                VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = label,
             };
-            var header = new DockPanel();
-            header.Children.Add(percent);
-            header.Children.Add(name);
             var slider = new Slider
             {
-                Minimum = 0, Maximum = 200, Value = 100, SmallChange = 5, LargeChange = 25, IsEnabled = enabled,
-                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, compact ? -6 : -4, 0, 0),
-                ToolTip = "Volume of this track while watching and in a saved trim",
+                Style = sliderStyle, Minimum = 0, Maximum = 200, Value = 100, SmallChange = 5, LargeChange = 25, IsEnabled = enabled,
+                VerticalAlignment = VerticalAlignment.Center,
             };
             slider.ValueChanged += TrackVolume_Changed;
-            Grid.SetRow(slider, 1);
-            var grid = new Grid();
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-            grid.Children.Add(header);
-            grid.Children.Add(slider);
-            TrackRows.Children.Add(new Border
-            {
-                Height = height, Margin = new Thickness(0, TimelineControl.RowGap, 0, 0), Background = (Brush)FindResource("CardBackground"),
-                CornerRadius = new CornerRadius(4), Padding = new Thickness(10, compact ? 1 : 3, 10, 0), Child = grid,
-            });
-            _trackControls.Add((slider, percent));
+            var row = new DockPanel { Height = height, Margin = new Thickness(0, TimelineControl.RowGap, 0, 0) };
+            DockPanel.SetDock(marker, Dock.Left);
+            DockPanel.SetDock(name, Dock.Left);
+            row.Children.Add(marker);
+            row.Children.Add(name);
+            row.Children.Add(slider);
+            TrackRows.Children.Add(row);
+            _trackControls.Add(slider);
         }
         _resettingEditor = was;
         ApplyGains();
@@ -332,6 +356,7 @@ public partial class MainWindow
         SeekSlider.Maximum = Math.Max(0.1, seconds);
         _updatingSeek = false;
         PlayerTotal.Text = FormatTime(seconds);
+        FsTime.Text = $"{PlayerTime.Text} / {PlayerTotal.Text}";
         UpdateTrimInfo();
     }
 
@@ -516,6 +541,7 @@ public partial class MainWindow
         _updatingSeek = false;
         Timeline.Position = seconds;
         PlayerTime.Text = FormatTime(seconds);
+        FsTime.Text = $"{PlayerTime.Text} / {PlayerTotal.Text}";
     }
 
     private void RefreshPlayerPosition()
@@ -565,6 +591,14 @@ public partial class MainWindow
     {
         if (!Player.NaturalDuration.HasTimeSpan) return;
         if (Timeline.Duration <= 0) ApplyDuration(Player.NaturalDuration.TimeSpan.TotalSeconds);
+        if (_startAt > 0)
+        {
+            // Opened from a still in the Latest panel: start where that still is. The clip's separate audio, once it
+            // is decoded, lines up with the picture wherever it is.
+            double start = _startAt;
+            _startAt = 0;
+            SeekTo(start);
+        }
     }
 
     private void Player_MediaEnded(object sender, RoutedEventArgs e)
@@ -732,21 +766,31 @@ public partial class MainWindow
             _prevState = WindowState;
             _prevStyle = WindowStyle;
             _prevResize = ResizeMode;
+            ApplyChrome(fullscreen: true);
             WindowStyle = WindowStyle.None;
             ResizeMode = ResizeMode.NoResize;
             if (WindowState == WindowState.Maximized) WindowState = WindowState.Normal;
             WindowState = WindowState.Maximized;
             PlayerHeader.Visibility = Visibility.Collapsed;
+            PlayerRail.Visibility = Visibility.Collapsed;
+            PlayerTitleRow.Visibility = Visibility.Collapsed;
             TimelinePanel.Visibility = Visibility.Collapsed;
-            TrimPanel.Visibility = Visibility.Collapsed;
+            Grid.SetRow(PlayerBody, 0);
+            Grid.SetRowSpan(PlayerBody, 2);
+            Grid.SetColumn(PlayerContent, 0);
+            Grid.SetColumnSpan(PlayerContent, 2);
+            PlayerContent.Margin = new Thickness(0);
+            PlayerSurface.Background = Brushes.Black;
             Grid.SetRow(ControlBar, 1);
-            // No timeline to line up with: the seek bar goes on top, across the whole width.
+            // No timeline to line up with: the seek bar goes on top, across the whole width, with the time beside it.
             Grid.SetRow(SeekRow, 0);
             Grid.SetRow(TransportRow, 1);
-            SeekRow.Margin = new Thickness(0, 0, 0, 6);
+            SeekRow.Margin = new Thickness(0, 0, 0, 8);
             SeekLabelColumn.Width = GridLength.Auto;
+            FsTime.Visibility = Visibility.Visible;
             ControlBar.VerticalAlignment = VerticalAlignment.Bottom;
             ControlBar.Background = BarOverlay;
+            ControlBar.Padding = new Thickness(24, 12, 24, 12);
             Panel.SetZIndex(ControlBar, 2);
             _hideControls.Start();
         }
@@ -758,19 +802,30 @@ public partial class MainWindow
             WindowState = _prevState;
             WindowStyle = _prevStyle;
             ResizeMode = _prevResize;
+            ApplyChrome(fullscreen: false);
             PlayerHeader.Visibility = Visibility.Visible;
+            PlayerRail.Visibility = Visibility.Visible;
+            PlayerTitleRow.Visibility = Visibility.Visible;
             TimelinePanel.Visibility = Visibility.Visible;
-            TrimPanel.Visibility = Visibility.Visible;
+            Grid.SetRow(PlayerBody, 1);
+            Grid.SetRowSpan(PlayerBody, 1);
+            Grid.SetColumn(PlayerContent, 1);
+            Grid.SetColumnSpan(PlayerContent, 1);
+            PlayerContent.Margin = new Thickness(24, 16, 26, 14);
+            PlayerSurface.Background = (Brush)FindResource("EspressoDeepBrush");
             Grid.SetRow(ControlBar, 2);
             Grid.SetRow(TransportRow, 0);
             Grid.SetRow(SeekRow, 1);
             SeekRow.Margin = new Thickness(0, 6, 0, 0);
             SeekLabelColumn.Width = TrackLabelWidth;
+            FsTime.Visibility = Visibility.Collapsed;
             ControlBar.VerticalAlignment = VerticalAlignment.Stretch;
-            ControlBar.Background = BarBackground;
+            ControlBar.Background = Brushes.Transparent;
+            ControlBar.Padding = new Thickness(0, 10, 0, 2);
             Panel.SetZIndex(ControlBar, 0);
         }
-        FullscreenGlyph.Text = on ? "" : "";
+        UpdateFrame();
+        FullscreenGlyph.Text = on ? "\uE73F" : "\uE740";
         FullscreenButton.ToolTip = on ? "Exit full screen (F, Esc)" : "Full screen (F)";
     }
 
@@ -797,12 +852,12 @@ public partial class MainWindow
 
     private static float Gain(Slider s) => (float)(Math.Round(s.Value / 5) * 5 / 100);
 
-    private float[] Gains => _trackControls.Select(c => Gain(c.Slider)).ToArray();
+    private float[] Gains => _trackControls.Select(Gain).ToArray();
 
     private void ApplyGains()
     {
         float[] gains = Gains;
-        for (int i = 0; i < gains.Length; i++) _trackControls[i].Percent.Text = $"{gains[i] * 100:0}%";
+        for (int i = 0; i < gains.Length; i++) _trackControls[i].ToolTip = $"Volume {gains[i] * 100:0}%, while watching and in a saved trim";
         _stemPlayer?.SetGains(gains);
         ApplyVolume();
     }
