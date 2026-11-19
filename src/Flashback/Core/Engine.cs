@@ -27,10 +27,12 @@ public sealed class Engine : IDisposable
     public AppAudioCapture Apps { get; } = new();
     public ClipService? Clips { get; }
     public JobObject Job => _job;
+    private readonly CpuWatch _cpuWatch;
 
     public Engine(SettingsStore settings)
     {
         Settings = settings;
+        _cpuWatch = new CpuWatch(Apps);
         FfmpegPath = Ffmpeg.Locate();
         if (FfmpegPath == null)
         {
@@ -67,6 +69,7 @@ public sealed class Engine : IDisposable
         if (s.Microphone) Mic.Start();
         if (s.DesktopAudio && s.SeparateAppAudio) Apps.Start();
         Recorder?.Start();
+        _cpuWatch.Start();
         Settings.Changed += OnSettingsChanged;
         // If the GPU encoder was unavailable (a driver update, for example), go back to it once it returns.
         _encoderRecheck = new System.Threading.Timer(_ =>
@@ -134,7 +137,13 @@ public sealed class Engine : IDisposable
             Recorder.RequestRestart("display changed");
     }
 
-    public void OnResume() => Recorder?.RequestRestart("resumed from sleep");
+    public void OnSuspend() => Apps.OnSuspend();
+
+    public void OnResume()
+    {
+        Apps.OnResume();
+        Recorder?.RequestRestart("resumed from sleep");
+    }
 
     /// <summary>The PC was unlocked: if capture was waiting to retry, retry right now.</summary>
     public void OnUnlocked() => Recorder?.Wake();
@@ -228,6 +237,7 @@ public sealed class Engine : IDisposable
         Settings.Changed -= OnSettingsChanged;
         _restartTimer?.Dispose();
         _encoderRecheck?.Dispose();
+        _cpuWatch.Dispose();
         Recorder?.Stop();
         Desktop.Stop();
         Mic.Stop();

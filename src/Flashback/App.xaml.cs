@@ -269,7 +269,8 @@ public partial class App : Application
 
     private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
     {
-        if (e.Mode == PowerModes.Resume) _engine.OnResume();
+        if (e.Mode == PowerModes.Suspend) _engine.OnSuspend();
+        else if (e.Mode == PowerModes.Resume) _engine.OnResume();
     }
 
     private void OnDisplaySettingsChanged(object? sender, EventArgs e) => _engine.OnDisplayChanged();

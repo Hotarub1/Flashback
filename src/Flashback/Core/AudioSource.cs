@@ -114,6 +114,19 @@ public sealed unsafe class AudioSource
 
     private void Run()
     {
+        ThreadCpu.Name(_processId > 0 ? $"capture of {_label}" : _label);
+        try
+        {
+            RunCaptures();
+        }
+        finally
+        {
+            ThreadCpu.Forget();
+        }
+    }
+
+    private void RunCaptures()
+    {
         _status = "Starting";
         while (!_stop)
         {
@@ -198,7 +211,7 @@ public sealed unsafe class AudioSource
             long lastCheck = Environment.TickCount64;
             while (!_stop && !_reinit)
             {
-                while (capture.GetNextPacketSize() > 0)
+                while (!_stop && !_reinit && capture.GetNextPacketSize() > 0)
                 {
                     IntPtr buffer = capture.GetBuffer(out int frames, out AudioClientBufferFlags flags, out _, out long qpc);
                     try
@@ -265,7 +278,9 @@ public sealed unsafe class AudioSource
             while (!_stop && !_reinit)
             {
                 ready.WaitOne(40);
-                while (capture.GetNextPacketSize() > 0)
+                // A stuck capture is so slow to hand over each packet that the next one is always waiting, so the
+                // draining also stops when the CPU check below is due; it would never run otherwise.
+                while (!_stop && !_reinit && Environment.TickCount64 - windowStart < CpuCheckMs && capture.GetNextPacketSize() > 0)
                 {
                     IntPtr buffer = capture.GetBuffer(out int frames, out AudioClientBufferFlags flags, out _, out long qpc);
                     try
@@ -279,10 +294,10 @@ public sealed unsafe class AudioSource
                     }
                 }
 
-                // Windows' per-app capture can get stuck copying memory flat out inside GetBuffer: after the speakers
-                // were unplugged, three of them each used a whole CPU core, with no end, while still delivering normal
-                // audio. A fresh capture of the same app is fine, so a capture that uses far more CPU than the
-                // fraction of a percent it normally needs is closed and opened again.
+                // Windows' per-app capture can get stuck copying memory flat out inside GetBuffer: after the PC woke
+                // from sleep (and after the speakers were unplugged), each used a whole CPU core, with no end, while
+                // still delivering normal audio. A fresh capture of the same app is fine, so a capture that uses far
+                // more CPU than the fraction of a percent it normally needs is closed and opened again.
                 long now = Environment.TickCount64;
                 if (now - windowStart < CpuCheckMs) continue;
                 long cpu = Win32.CurrentThreadCpu();

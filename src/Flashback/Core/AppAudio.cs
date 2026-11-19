@@ -24,6 +24,11 @@ public sealed class AppAudioCapture
 {
     private const int PollMs = 1000;
     private const int MaxDepth = 64;
+    /// <summary>After the PC wakes, Windows brings the audio devices back over a few seconds.</summary>
+    private const int WakeSettleMs = 5000;
+    /// <summary>Reopens of all app captures in a row before they are closed for a while instead.</summary>
+    private const int MaxBusyReopens = 5;
+    private const int BusyPauseMs = 10 * 60_000;
 
     private sealed class Tracked(AppAudioRing app, AudioSource source)
     {
@@ -44,6 +49,13 @@ public sealed class AppAudioCapture
     private string _lastError = "";
     /// <summary>The default output device at the last poll: "" when there was none, null before the first poll.</summary>
     private string? _output;
+    private volatile bool _asleep;
+    /// <summary>When set, the poll thread first closes every app capture, logging this as the reason.</summary>
+    private string? _closeAll;
+    /// <summary>No app capture is opened before this <see cref="Environment.TickCount64"/>.</summary>
+    private long _openAfter;
+    private int _busyStrikes;
+    private long _nextBusyAction;
 
     /// <summary>Process loopback exists from Windows 10 version 2004 (build 19041).</summary>
     public static bool Supported => OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041);
@@ -69,6 +81,9 @@ public sealed class AppAudioCapture
     {
         if (_thread != null || !Supported) return;
         _stop = false;
+        _asleep = false;
+        _closeAll = null;
+        _openAfter = 0;
         _thread = new Thread(Run) { IsBackground = true, Name = "App audio" };
         _thread.SetApartmentState(ApartmentState.MTA);
         _thread.Start();
@@ -124,12 +139,16 @@ public sealed class AppAudioCapture
         {
             try
             {
-                enumerator ??= new MMDeviceEnumerator();
-                using MMDevice? output = DefaultOutput(enumerator);
-                string id = output?.ID ?? "";
-                if (_output != null && id != _output) OnOutputChanged(_output, id);
-                _output = id;
-                if (output != null) Poll(output);
+                if (Interlocked.Exchange(ref _closeAll, null) is string reason) CloseAll(reason);
+                if (!_asleep && Environment.TickCount64 >= Interlocked.Read(ref _openAfter))
+                {
+                    enumerator ??= new MMDeviceEnumerator();
+                    using MMDevice? output = DefaultOutput(enumerator);
+                    string id = output?.ID ?? "";
+                    if (_output != null && id != _output) OnOutputChanged(_output, id);
+                    _output = id;
+                    if (output != null) Poll(output);
+                }
                 _lastError = "";
             }
             catch (Exception ex)
@@ -176,14 +195,7 @@ public sealed class AppAudioCapture
             if (now.Length == 0)
             {
                 Log.Info($"App audio: no output device (unplugged?), pausing {_active.Count} app captures until one is back");
-                double time = Clock.UtcNow();
-                foreach (Tracked t in _active.Values)
-                {
-                    t.StoppedUtc = time;
-                    _retired.Add(t);
-                    toStop.Add(t.Source);
-                }
-                _active.Clear();
+                toStop = RetireAllLocked();
             }
             else if (old.Length == 0)
             {
@@ -196,6 +208,89 @@ public sealed class AppAudioCapture
             }
         }
         foreach (AudioSource s in toStop) s.Stop(keepAudio: true);
+    }
+
+    /// <summary>Moves every app capture to the retired list, keeping what they captured. The caller stops them.</summary>
+    private List<AudioSource> RetireAllLocked()
+    {
+        double time = Clock.UtcNow();
+        var sources = new List<AudioSource>();
+        foreach (Tracked t in _active.Values)
+        {
+            t.StoppedUtc = time;
+            _retired.Add(t);
+            sources.Add(t.Source);
+        }
+        _active.Clear();
+        return sources;
+    }
+
+    private void CloseAll(string reason)
+    {
+        List<AudioSource> toStop;
+        lock (_lock) toStop = RetireAllLocked();
+        if (toStop.Count == 0) return;
+        Log.Info($"App audio: {reason}, closing {toStop.Count} app captures");
+        foreach (AudioSource s in toStop) s.Stop(keepAudio: true);
+    }
+
+    /// <summary>
+    /// The PC is going to sleep. App captures that run on through a sleep can come back stuck: after a night asleep,
+    /// Windows' threads for them copied memory flat out on every core until Flashback was closed. So they are closed
+    /// now, and opened afresh once the PC is awake again.
+    /// </summary>
+    public void OnSuspend()
+    {
+        _asleep = true;
+        Volatile.Write(ref _closeAll, "the PC is going to sleep");
+        _wake.Set();
+    }
+
+    /// <summary>The PC woke up. App captures are opened again once the audio devices have settled.</summary>
+    public void OnResume()
+    {
+        Interlocked.Exchange(ref _openAfter, Environment.TickCount64 + WakeSettleMs);
+        // In case the PC went to sleep without saying so, no capture runs on from before.
+        Interlocked.CompareExchange(ref _closeAll, "the PC woke from sleep", null);
+        _asleep = false;
+        _wake.Set();
+    }
+
+    /// <summary>
+    /// Called every few seconds with the CPU that Windows' own threads for the app captures used, as a share of one
+    /// core. When they are stuck copying memory (seen after the PC woke from sleep), reopening the captures gives
+    /// Windows fresh ones. If that does not help it is tried less and less often, and after about two minutes the
+    /// app captures are closed for ten minutes, so they can never keep the CPU busy for long.
+    /// </summary>
+    internal void CheckWindowsCaptureCpu(double share, int threads)
+    {
+        if (share <= CpuWatch.MaxCaptureShare)
+        {
+            _busyStrikes = 0;
+            return;
+        }
+        long now = Environment.TickCount64;
+        if (now < _nextBusyAction) return;
+        _busyStrikes++;
+        if (_busyStrikes > MaxBusyReopens)
+        {
+            _busyStrikes = 0;
+            _nextBusyAction = now + BusyPauseMs;
+            Interlocked.Exchange(ref _openAfter, now + BusyPauseMs);
+            Volatile.Write(ref _closeAll, $"Windows' capture threads still used {share * 100:F0}% of a CPU core after {MaxBusyReopens} reopens, " +
+                                          "so there are no separate app tracks for the next 10 minutes");
+            _wake.Set();
+            return;
+        }
+        _nextBusyAction = now + Math.Min(60_000, 5_000 << (_busyStrikes - 1));
+        int count;
+        lock (_lock)
+        {
+            count = _active.Count;
+            foreach (Tracked t in _active.Values) t.Source.Reopen();
+        }
+        Log.Warn($"App audio: Windows' {threads} capture threads were using {share * 100:F0}% of a CPU core, reopening {count} app captures" +
+                 (_busyStrikes > 1 ? $" (again, {_busyStrikes} times in a row)" : ""));
     }
 
     private void Poll(MMDevice output)
