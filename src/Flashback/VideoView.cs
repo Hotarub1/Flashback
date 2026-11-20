@@ -15,8 +15,8 @@ namespace Flashback;
 /// engine they stay up 16.7 ms, give or take a refresh, and none are skipped.
 ///
 /// The element sizes itself to the video's shape (centre it to letterbox). Being a window of its own, WPF cannot draw
-/// over it: <see cref="CutBottom"/> leaves a strip clear for the full-screen control bar. Mouse input passes through to
-/// the WPF window underneath.
+/// over it: the full-screen control bar sits in a window of its own on top (<see cref="BarWindow"/>). Mouse input
+/// passes through to the WPF window underneath.
 /// </summary>
 public sealed class VideoView : HwndHost
 {
@@ -27,7 +27,6 @@ public sealed class VideoView : HwndHost
     private int _generation;
     private bool _wantPlay;
     private double _aspect;
-    private double _cutBottom;
 
     public event Action? Opened;
     public event Action? Ended;
@@ -74,18 +73,6 @@ public sealed class VideoView : HwndHost
         {
             _muted = value;
             if (_engine is { } engine) Call(() => engine.SetMuted(value));
-        }
-    }
-
-    /// <summary>How much of the bottom of the picture (in WPF units) to leave out, so WPF content there shows.</summary>
-    public double CutBottom
-    {
-        get => _cutBottom;
-        set
-        {
-            if (Math.Abs(value - _cutBottom) < 0.5) return;
-            _cutBottom = value;
-            ApplyCut();
         }
     }
 
@@ -252,7 +239,6 @@ public sealed class VideoView : HwndHost
     protected override void OnWindowPositionChanged(Rect rcBoundingBox)
     {
         base.OnWindowPositionChanged(rcBoundingBox);
-        ApplyCut();
         Redraw();
     }
 
@@ -288,15 +274,6 @@ public sealed class VideoView : HwndHost
                 return IntPtr.Zero;
         }
         return base.WndProc(hwnd, msg, wParam, lParam, ref handled);
-    }
-
-    private void ApplyCut()
-    {
-        if (_hwnd == IntPtr.Zero || !Mf.GetClientRect(_hwnd, out Mf.RECT r)) return;
-        double scale = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformToDevice.M22 ?? 1;
-        int cut = (int)Math.Round(_cutBottom * scale);
-        IntPtr region = cut <= 0 ? IntPtr.Zero : Mf.CreateRectRgn(0, 0, r.Right, Math.Max(0, r.Bottom - cut));
-        if (Mf.SetWindowRgn(_hwnd, region, true) == 0 && region != IntPtr.Zero) Mf.DeleteObject(region); // the window owns it otherwise
     }
 
     /// <summary>Receives the engine's events on its own threads; they are handed to the UI thread.</summary>
@@ -354,13 +331,10 @@ public sealed class VideoView : HwndHost
         public static extern IntPtr CreateWindowEx(int exStyle, string className, string name, int style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
         [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
-        [DllImport("user32.dll")] public static extern int SetWindowRgn(IntPtr hwnd, IntPtr region, bool redraw);
         [DllImport("user32.dll")] public static extern IntPtr BeginPaint(IntPtr hwnd, out PAINTSTRUCT ps);
         [DllImport("user32.dll")] public static extern bool EndPaint(IntPtr hwnd, ref PAINTSTRUCT ps);
         [DllImport("user32.dll")] public static extern int FillRect(IntPtr dc, ref RECT rect, IntPtr brush);
         [DllImport("gdi32.dll")] public static extern IntPtr GetStockObject(int index);
-        [DllImport("gdi32.dll")] public static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
-        [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
 
         [ComImport, Guid("2cd2d921-c447-44a7-a13c-4adabfc247e3"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         public interface IMFAttributes

@@ -26,6 +26,9 @@ internal static class Win32
     public static extern IntPtr MonitorFromPoint(POINT pt, uint flags);
 
     [DllImport("user32.dll")]
+    public static extern bool GetCursorPos(out POINT pt);
+
+    [DllImport("user32.dll")]
     public static extern int GetSystemMetricsForDpi(int index, uint dpi);
 
     [DllImport("dwmapi.dll")]

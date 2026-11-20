@@ -649,8 +649,10 @@
 
                         <!-- Transport, then the seek bar right above the timeline, starting and ending where the timeline does so
                              both show the same moment at the same place. In full screen the bar floats over the bottom of the video
-                             with the seek bar on top across the whole width, and hides when the mouse rests. -->
-                        <Border x:Name="ControlBar" Grid.Row="2" Padding="0,10,0,2">
+                             with the seek bar on top across the whole width, and hides when the mouse rests. WPF cannot draw over the video, so there the host is invisible but still takes the clicks,
+                             and a see-through window on top (BarWindow) shows a live picture of it and lets the mouse through. -->
+                        <Border x:Name="ControlBarHost" Grid.Row="2">
+                        <Border x:Name="ControlBar" Padding="0,10,0,2" Background="Transparent">
                             <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
@@ -699,6 +701,7 @@
                                             Thumb.DragStarted="Seek_DragStarted" Thumb.DragCompleted="Seek_DragCompleted" ValueChanged="Seek_ValueChanged"/>
                                 </Grid>
                             </Grid>
+                        </Border>
                         </Border>
 
                         <!-- Timeline: volume per track on the left, the ruler, video bar and waveforms on the right. Row heights match the control. -->

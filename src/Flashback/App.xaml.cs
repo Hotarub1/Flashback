@@ -372,6 +372,7 @@ public partial class App : Application
                 Log.Info("Align check: " + _window.AlignCheck());
                 Log.Info("Scrub check: " + await _window.ScrubCheckAsync());
                 Log.Info("Volume check: " + _window.VolumeCheck());
+                Log.Info("Full screen check: " + await _window.FullscreenCheckAsync(Path.Combine(dir, "fullscreen-bar.png")));
                 _window.ClosePlayerForTest();
                 Log.Info("Still check: " + await _window.StillCheckAsync());
             }

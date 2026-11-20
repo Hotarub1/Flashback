@@ -37,8 +37,6 @@ public partial class MainWindow
     private const int ScrubSeekIntervalMs = 90;
     /// <summary>Width of the label column left of the timeline. The seek bar starts after the same width, so it lines up with the timeline.</summary>
     public static readonly GridLength TrackLabelWidth = new(210);
-    private static readonly Brush BarOverlay = new SolidColorBrush(Color.FromArgb(0xE0, 0x4B, 0x38, 0x32));
-
     private readonly DispatcherTimer _playerTimer = new() { Interval = TimeSpan.FromMilliseconds(50) };
     private readonly DispatcherTimer _hideControls = new() { Interval = TimeSpan.FromSeconds(2.5) };
     private readonly DispatcherTimer _scrubTimer = new() { Interval = TimeSpan.FromMilliseconds(30) };
@@ -62,6 +60,11 @@ public partial class MainWindow
     private WindowState _prevState;
     private WindowStyle _prevStyle;
     private ResizeMode _prevResize;
+    /// <summary>Whether full screen made the window cover the screen (the diagnostics only lay the player out for it).</summary>
+    private bool _tookScreen;
+    /// <summary>Shows the control bar over the video in full screen; made the first time.</summary>
+    private BarWindow? _barWindow;
+    private Win32.POINT _lastPointer;
 
     /// <summary>Set by diagnostics (--render-ui) so the check plays nothing through the speakers.</summary>
     public bool PlayerSilent { get; set; }
@@ -69,13 +72,7 @@ public partial class MainWindow
     private void InitPlayer()
     {
         _playerTimer.Tick += (_, _) => RefreshPlayerPosition();
-        _hideControls.Tick += (_, _) =>
-        {
-            _hideControls.Stop();
-            if (!_fullscreen) return;
-            ControlBar.Visibility = Visibility.Hidden;
-            PlayerSurface.Cursor = Cursors.None;
-        };
+        _hideControls.Tick += (_, _) => HideIdleBar();
         _scrubTimer.Tick += (_, _) =>
         {
             if (_scrubPending && Environment.TickCount64 - _lastScrubSeek >= ScrubSeekIntervalMs) ApplyScrubSeek();
@@ -84,10 +81,10 @@ public partial class MainWindow
         Video.Opened += Video_Opened;
         Video.Ended += Video_Ended;
         Video.Failed += Video_Failed;
-        // The video is a window of its own that WPF cannot draw over: keep the full-screen bar's strip clear of it.
-        Video.SizeChanged += (_, _) => UpdateVideoCut();
-        ControlBar.SizeChanged += (_, _) => UpdateVideoCut();
-        ControlBar.IsVisibleChanged += (_, _) => UpdateVideoCut();
+        // In full screen the bar's own window follows the video's area.
+        PlayerSurface.SizeChanged += (_, _) => PlaceBar();
+        ControlBar.SizeChanged += (_, _) => PlaceBar();
+        LocationChanged += (_, _) => PlaceBar();
         SeekSlider.SizeChanged += (_, _) => AlignSeekSlider();
         VolumeSlider.Value = _engine.Settings.Current.PlayerVolume;
         _volumeReady = true;
@@ -618,21 +615,6 @@ public partial class MainWindow
         ShowPlayerError(message);
     }
 
-    /// <summary>
-    /// In full screen the control bar floats over the bottom of the video. WPF cannot draw over the video's window, so
-    /// while the bar shows, the video leaves out the strip the bar covers (the bar is nearly opaque, so it looks the same).
-    /// </summary>
-    private void UpdateVideoCut()
-    {
-        double cut = 0;
-        if (_fullscreen && ControlBar.IsVisible && Video.IsVisible && Video.ActualHeight > 0)
-        {
-            double barTop = ControlBar.TranslatePoint(new Point(0, 0), Video).Y;
-            cut = Math.Clamp(Video.ActualHeight - barTop, 0, Video.ActualHeight);
-        }
-        Video.CutBottom = cut;
-    }
-
     private void PlayPause_Click(object sender, RoutedEventArgs e) => TogglePlay();
     private void ToStart_Click(object sender, RoutedEventArgs e) => SeekTo(0);
     private void ToEnd_Click(object sender, RoutedEventArgs e) => SeekTo(VideoDuration);
@@ -775,20 +757,27 @@ public partial class MainWindow
 
     // ================================================================ full screen
 
-    private void SetFullscreen(bool on)
+    private void SetFullscreen(bool on) => SetFullscreen(on, takeScreen: true);
+
+    /// <param name="takeScreen">False only for the diagnostics: the player is laid out for full screen, the window stays as it is.</param>
+    private void SetFullscreen(bool on, bool takeScreen)
     {
         if (on == _fullscreen) return;
         _fullscreen = on;
         if (on)
         {
-            _prevState = WindowState;
-            _prevStyle = WindowStyle;
-            _prevResize = ResizeMode;
-            ApplyChrome(fullscreen: true);
-            WindowStyle = WindowStyle.None;
-            ResizeMode = ResizeMode.NoResize;
-            if (WindowState == WindowState.Maximized) WindowState = WindowState.Normal;
-            WindowState = WindowState.Maximized;
+            _tookScreen = takeScreen;
+            if (takeScreen)
+            {
+                _prevState = WindowState;
+                _prevStyle = WindowStyle;
+                _prevResize = ResizeMode;
+                ApplyChrome(fullscreen: true);
+                WindowStyle = WindowStyle.None;
+                ResizeMode = ResizeMode.NoResize;
+                if (WindowState == WindowState.Maximized) WindowState = WindowState.Normal;
+                WindowState = WindowState.Maximized;
+            }
             PlayerHeader.Visibility = Visibility.Collapsed;
             PlayerRail.Visibility = Visibility.Collapsed;
             PlayerTitleRow.Visibility = Visibility.Collapsed;
@@ -799,28 +788,33 @@ public partial class MainWindow
             Grid.SetColumnSpan(PlayerContent, 2);
             PlayerContent.Margin = new Thickness(0);
             PlayerSurface.Background = Brushes.Black;
-            Grid.SetRow(ControlBar, 1);
             // No timeline to line up with: the seek bar goes on top, across the whole width, with the time beside it.
             Grid.SetRow(SeekRow, 0);
             Grid.SetRow(TransportRow, 1);
             SeekRow.Margin = new Thickness(0, 0, 0, 8);
             SeekLabelColumn.Width = GridLength.Auto;
             FsTime.Visibility = Visibility.Visible;
-            ControlBar.VerticalAlignment = VerticalAlignment.Bottom;
-            ControlBar.Background = BarOverlay;
             ControlBar.Padding = new Thickness(24, 12, 24, 12);
-            Panel.SetZIndex(ControlBar, 2);
+            ShowBarOverVideo();
             _hideControls.Start();
         }
         else
         {
             _hideControls.Stop();
-            ControlBar.Visibility = Visibility.Visible;
+            _barWindow?.Hide();
+            Grid.SetRow(ControlBarHost, 2);
+            ControlBarHost.VerticalAlignment = VerticalAlignment.Stretch;
+            ControlBarHost.Opacity = 1;
+            ControlBarHost.Visibility = Visibility.Visible;
+            Panel.SetZIndex(ControlBarHost, 0);
             PlayerSurface.Cursor = Cursors.Arrow;
-            WindowState = _prevState;
-            WindowStyle = _prevStyle;
-            ResizeMode = _prevResize;
-            ApplyChrome(fullscreen: false);
+            if (_tookScreen)
+            {
+                WindowState = _prevState;
+                WindowStyle = _prevStyle;
+                ResizeMode = _prevResize;
+                ApplyChrome(fullscreen: false);
+            }
             PlayerHeader.Visibility = Visibility.Visible;
             PlayerRail.Visibility = Visibility.Visible;
             PlayerTitleRow.Visibility = Visibility.Visible;
@@ -831,34 +825,97 @@ public partial class MainWindow
             Grid.SetColumnSpan(PlayerContent, 1);
             PlayerContent.Margin = new Thickness(24, 16, 26, 14);
             PlayerSurface.Background = (Brush)FindResource("EspressoDeepBrush");
-            Grid.SetRow(ControlBar, 2);
             Grid.SetRow(TransportRow, 0);
             Grid.SetRow(SeekRow, 1);
             SeekRow.Margin = new Thickness(0, 6, 0, 0);
             SeekLabelColumn.Width = TrackLabelWidth;
             FsTime.Visibility = Visibility.Collapsed;
-            ControlBar.VerticalAlignment = VerticalAlignment.Stretch;
-            ControlBar.Background = Brushes.Transparent;
             ControlBar.Padding = new Thickness(0, 10, 0, 2);
-            Panel.SetZIndex(ControlBar, 0);
         }
         UpdateFrame();
-        UpdateVideoCut();
         FullscreenGlyph.Text = on ? "\uE73F" : "\uE740";
         FullscreenButton.ToolTip = on ? "Exit full screen (F, Esc)" : "Full screen (F)";
     }
 
-    private void PlayerOverlay_MouseMove(object sender, MouseEventArgs e)
+    /// <summary>
+    /// Floats the control bar over the bottom of the video. WPF cannot draw over the video's window, so the real bar
+    /// stays in the player's window, invisible but taking the clicks (they reach it through the video, as clicks on the
+    /// video always did), and a see-through window on top shows a live picture of it with the video showing through.
+    /// </summary>
+    private void ShowBarOverVideo()
     {
-        if (!_fullscreen) return;
-        if (ControlBar.Visibility != Visibility.Visible)
+        Grid.SetRow(ControlBarHost, 1);
+        ControlBarHost.VerticalAlignment = VerticalAlignment.Bottom;
+        ControlBarHost.Opacity = 0;
+        Panel.SetZIndex(ControlBarHost, 2);
+        BarWindow bar = _barWindow ??= CreateBarWindow();
+        ShowFullscreenBar(true);
+        _lastPointer = Win32.GetCursorPos(out Win32.POINT p) ? p : default;
+        // Shown once the player is laid out full screen, so it never flashes up at the old size.
+        Dispatcher.BeginInvoke(() =>
         {
-            ControlBar.Visibility = Visibility.Visible;
-            PlayerSurface.Cursor = Cursors.Arrow;
+            if (!_fullscreen) return;
+            PlaceBar();
+            bar.Show();
+        }, DispatcherPriority.Loaded);
+    }
+
+    private BarWindow CreateBarWindow()
+    {
+        var bar = new BarWindow(this, ControlBar);
+        bar.DpiChanged += (_, _) => Dispatcher.BeginInvoke(PlaceBar);
+        return bar;
+    }
+
+    /// <summary>Lays the bar's window over the bottom of the video's area, as tall as the bar and its shade.</summary>
+    private void PlaceBar()
+    {
+        if (!_fullscreen || _barWindow is not { } bar || !PlayerSurface.IsVisible || PlayerSurface.ActualWidth <= 0 || ControlBar.ActualHeight <= 0
+            || PresentationSource.FromVisual(PlayerSurface) is not { CompositionTarget: { } target }) return;
+        bar.SetBarSize(ControlBar.ActualWidth, ControlBar.ActualHeight);
+        Point topLeft = PlayerSurface.PointToScreen(new Point(0, 0));
+        Point bottomRight = PlayerSurface.PointToScreen(new Point(PlayerSurface.ActualWidth, PlayerSurface.ActualHeight));
+        double scale = target.TransformToDevice.M22;
+        int height = (int)Math.Round(Math.Min((BarWindow.FadeHeight + ControlBar.ActualHeight) * scale, bottomRight.Y - topLeft.Y));
+        int left = (int)Math.Round(topLeft.X), right = (int)Math.Round(bottomRight.X), bottom = (int)Math.Round(bottomRight.Y);
+        bar.Place(left, bottom - height, right - left, height);
+    }
+
+    private void ShowFullscreenBar(bool shown)
+    {
+        _barWindow?.SetShown(shown);
+        // Hidden, the bar takes no clicks: a click there is a click on the video again.
+        ControlBarHost.Visibility = shown ? Visibility.Visible : Visibility.Hidden;
+        PlayerSurface.Cursor = shown ? Cursors.Arrow : Cursors.None;
+    }
+
+    /// <summary>Hides the bar and the pointer once the mouse has rested, but not while it is on the bar or dragging.</summary>
+    private void HideIdleBar()
+    {
+        _hideControls.Stop();
+        if (!_fullscreen) return;
+        if (ControlBar.IsMouseOver || _scrubbing)
+        {
+            _hideControls.Start();
+            return;
         }
+        ShowFullscreenBar(false);
+    }
+
+    /// <summary>
+    /// The mouse moved: show the bar and start counting again. Only a real move counts. WPF also reports a "move" when
+    /// what is under a still pointer changes, which would bring the bar straight back as it hides.
+    /// </summary>
+    private void PokeFullscreenBar()
+    {
+        if (!_fullscreen || !Win32.GetCursorPos(out Win32.POINT p) || (p.X == _lastPointer.X && p.Y == _lastPointer.Y)) return;
+        _lastPointer = p;
+        if (_barWindow is { Shown: false }) ShowFullscreenBar(true);
         _hideControls.Stop();
         _hideControls.Start();
     }
+
+    private void PlayerOverlay_MouseMove(object sender, MouseEventArgs e) => PokeFullscreenBar();
 
     // ================================================================ volume and trim
 
@@ -961,6 +1018,106 @@ public partial class MainWindow
     }
 
     public void ClosePlayerForTest() => ClosePlayer();
+
+    /// <summary>
+    /// Lays the player out for full screen without making the window full screen (that would take over the user's
+    /// screen), reports where the bar's window went, that it lets clicks through to the real bar right under its
+    /// picture, that play / pause and the seek bar work there, hides and shows it, draws it over the clip's still to
+    /// <paramref name="png"/>, and checks that the bar is back in its place afterwards.
+    /// </summary>
+    public async Task<string> FullscreenCheckAsync(string png)
+    {
+        if (_playing == null) return "no clip open";
+        IntPtr foreground = GetForegroundWindow();
+        string before = DescribeWindow(foreground);
+        SetFullscreen(true, takeScreen: false);
+        await Task.Delay(600);
+        var parts = new List<string>();
+        if (_barWindow is not { } bar || bar.Content is not FrameworkElement barRoot) return "no bar window";
+        Point tl = PlayerSurface.PointToScreen(new Point(0, 0));
+        Point br = PlayerSurface.PointToScreen(new Point(PlayerSurface.ActualWidth, PlayerSurface.ActualHeight));
+        Point controlsTop = ControlBar.PointToScreen(new Point(0, 0));
+        Win32.RECT r = bar.ScreenRect;
+        parts.Add($"surface {tl.X:0},{tl.Y:0}-{br.X:0},{br.Y:0}, bar window {r.Left},{r.Top}-{r.Right},{r.Bottom} ({r.Width}x{r.Height}), " +
+                  $"real bar at {controlsTop.X:0},{controlsTop.Y:0} {ControlBar.ActualWidth:0}x{ControlBar.ActualHeight:0} (picture at {r.Left},{r.Bottom - ControlBar.ActualHeight:0})");
+        parts.Add($"shown={bar.IsVisible} clickThrough={bar.ClickThrough} active={bar.IsActive} foreground unchanged={GetForegroundWindow() == foreground} " +
+                  $"(before: {before}, now: {DescribeWindow(GetForegroundWindow())})");
+
+        // A click where the picture shows a control lands on that control in the player's window.
+        string HitAt(FrameworkElement element, double fx, double fy)
+        {
+            Point at = element.TranslatePoint(new Point(element.ActualWidth * fx, element.ActualHeight * fy), this);
+            return InputHitTest(at) is DependencyObject hit && (hit == element || element.IsAncestorOf(hit)) ? "yes" : $"no ({InputHitTest(at)?.GetType().Name ?? "nothing"})";
+        }
+        Point aboveBar = ControlBar.TranslatePoint(new Point(ControlBar.ActualWidth / 2, -40), this);
+        parts.Add($"hits: play={HitAt(PlayPauseButton, 0.5, 0.5)} seek bar={HitAt(SeekSlider, 0.25, 0.5)} volume={HitAt(VolumeSlider, 0.5, 0.5)} exit={HitAt(FullscreenButton, 0.5, 0.5)} " +
+                  $"shade above it={InputHitTest(aboveBar)?.GetType().Name ?? "nothing"}");
+        bool wasPlaying = _isPlaying;
+        PlayPauseButton.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        bool afterClick = _isPlaying;
+        PlayPauseButton.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        double target = 0;
+        if (SeekSlider.Template?.FindName("PART_Track", SeekSlider) is Track track)
+        {
+            target = track.ValueFromPoint(new Point(track.ActualWidth * 0.25, track.ActualHeight / 2));
+            SeekSlider.Value = target; // what a click on the seek bar does (IsMoveToPointEnabled)
+        }
+        await Task.Delay(400);
+        parts.Add($"play / pause: {wasPlaying} -> {afterClick} -> {_isPlaying}; seek bar click to {target:F2}s: video at {Video.Position:F2}s");
+
+        // What it looks like: the bar's window drawn over the part of the clip's still it covers.
+        int w = (int)Math.Ceiling(barRoot.ActualWidth), h = (int)Math.Ceiling(barRoot.ActualHeight);
+        if (w > 0 && h > 0)
+        {
+            var barImage = new System.Windows.Media.Imaging.RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+            barImage.Render(barRoot);
+            var picture = new DrawingVisual();
+            using (DrawingContext dc = picture.RenderOpen())
+            {
+                dc.DrawRectangle(Brushes.Black, null, new Rect(0, 0, w, h));
+                if (_playing.Thumbnail is { } still && Video.ActualWidth > 0)
+                {
+                    // Where the video is drawn, in the bar window's terms (the bar covers the bottom of the surface).
+                    double x = (PlayerSurface.ActualWidth - Video.ActualWidth) / 2;
+                    double y = (PlayerSurface.ActualHeight - Video.ActualHeight) / 2 - (PlayerSurface.ActualHeight - h);
+                    dc.DrawImage(still, new Rect(x, y, Video.ActualWidth, Video.ActualHeight));
+                }
+                dc.DrawImage(barImage, new Rect(0, 0, w, h));
+            }
+            var composite = new System.Windows.Media.Imaging.RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+            composite.Render(picture);
+            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+            encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(composite));
+            using (FileStream fs = File.Create(png)) encoder.Save(fs);
+        }
+
+        HideIdleBar();
+        parts.Add($"after resting: shown={bar.Shown} takes clicks={ControlBarHost.IsVisible} pointer={(PlayerSurface.Cursor == Cursors.None ? "hidden" : "shown")}");
+        ShowFullscreenBar(true);
+        parts.Add($"after a move: shown={bar.Shown} takes clicks={ControlBarHost.IsVisible}");
+
+        SetFullscreen(false);
+        await Task.Delay(200);
+        parts.Add($"after leaving: bar row {Grid.GetRow(ControlBarHost)} opacity {ControlBarHost.Opacity} window hidden={!bar.IsVisible}");
+        return string.Join("; ", parts);
+    }
+
+    /// <summary>A window as "this app's main window", "this app's bar", or another program's name, for the checks.</summary>
+    private string DescribeWindow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return "none";
+        if (hwnd == new System.Windows.Interop.WindowInteropHelper(this).Handle) return "this app's main window";
+        if (_barWindow != null && hwnd == new System.Windows.Interop.WindowInteropHelper(_barWindow).Handle) return "this app's bar";
+        GetWindowThreadProcessId(hwnd, out int pid);
+        try { return pid == Environment.ProcessId ? "another window of this app" : System.Diagnostics.Process.GetProcessById(pid).ProcessName; }
+        catch { return $"process {pid}"; }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int GetWindowThreadProcessId(IntPtr hwnd, out int pid);
 
     /// <summary>
     /// Puts the playhead at a few places and reports how far apart the seek bar's thumb and the timeline's playhead
