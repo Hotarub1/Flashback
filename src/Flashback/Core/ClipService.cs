@@ -6,6 +6,18 @@ namespace Flashback.Core;
 
 public sealed record ClipResult(bool Ok, string? Path, string? Error, double Seconds, double StartUtc = 0);
 
+/// <summary>A piece of buffered video and how long it lasts in the clip (longer than the piece when its last picture is held).</summary>
+internal readonly record struct ClipPiece(Segment Segment, double Duration);
+
+/// <summary>
+/// What goes into a clip: the pieces in order, and the stretches of real time they show. Normally that is one stretch;
+/// it is two when the clip starts inside a long still stretch (see <see cref="ClipService.Plan"/>).
+/// </summary>
+internal sealed record ClipPlan(List<ClipPiece> Pieces, List<(double Start, double End)> Parts)
+{
+    public double Seconds => Parts.Sum(p => p.End - p.Start);
+}
+
 /// <summary>Turns the last N seconds of buffered video and audio into an MP4 file.</summary>
 public sealed class ClipService
 {
@@ -60,12 +72,22 @@ public sealed class ClipService
 
     private ClipResult Save(AppSettings s, double pressed, bool silenceAfterPress)
     {
-        // Wait (at most ~2.5 s) for the segment containing the key press to be finished, so the clip
+        // Wait (at most ~3 s) for the segment containing the key press to be finished, so the clip
         // includes everything right up to the moment the hotkey was hit.
         long waitStart = Environment.TickCount64;
-        while (_recorder.LatestEndUtc < pressed && Environment.TickCount64 - waitStart < 2500
+        Segment? open = null;
+        while (_recorder.LatestEndUtc < pressed && Environment.TickCount64 - waitStart < 3000
                && _recorder.Status.State is RecorderState.Recording or RecorderState.Starting)
+        {
+            // With Graphics Capture nothing arrives while the screen is still, so the piece holding the latest
+            // picture stays open. Pieces normally finish every second; after 2.5 s without one, use the open piece.
+            if (_recorder.MsSinceLastPiece >= 2500)
+            {
+                open = _recorder.OpenPiece();
+                break;
+            }
             Thread.Sleep(40);
+        }
 
         _recorder.BeginRead();
         string listFile = Path.Combine(AppPaths.TempDir, $"clip_{Guid.NewGuid():N}.ffconcat");
@@ -73,8 +95,14 @@ public sealed class ClipService
         string? partFile = null;
         try
         {
-            List<Segment> chosen = ChooseSegments(_recorder.Snapshot(), pressed, s.ClipSeconds);
-            if (chosen.Count == 0)
+            List<Segment> pieces = _recorder.Snapshot();
+            // Unless the screen changed meanwhile and FFmpeg finished it after all.
+            if (open != null && pieces.All(p => p.Path != open.Path) && (pieces.Count == 0 || open.StartUtc >= pieces[^1].EndUtc - 0.01))
+                pieces.Add(open);
+            else
+                open = null;
+            ClipPlan? plan = Plan(pieces, pressed, s.ClipSeconds, _recorder.WasRecording);
+            if (plan == null)
             {
                 var st = _recorder.Status;
                 string why = st.State == RecorderState.Recording
@@ -82,15 +110,15 @@ public sealed class ClipService
                     : $"Recording is not running ({(st.Detail.Length > 0 ? st.Detail : st.State.ToString())})";
                 return new ClipResult(false, null, why, 0);
             }
-            double seconds = chosen.Sum(x => x.EndUtc - x.StartUtc);
+            double seconds = plan.Seconds;
 
             // Give the last few milliseconds of audio time to arrive from the sound card.
             Thread.Sleep(150);
             ClipStems? stems = s.DesktopAudio || s.Microphone
-                ? BuildAudio(chosen, s, silenceAfterPress ? pressed - SoundCutLeadSeconds : null)
+                ? BuildAudio(plan.Parts, s, silenceAfterPress ? pressed - SoundCutLeadSeconds : null)
                 : null;
 
-            File.WriteAllText(listFile, ConcatList(chosen, quickProbe: true), new UTF8Encoding(false));
+            File.WriteAllText(listFile, ConcatList(plan.Pieces, quickProbe: true), new UTF8Encoding(false));
 
             Directory.CreateDirectory(s.SaveFolder);
             long needed = (long)(seconds * 8_000_000) + 200L * 1024 * 1024;
@@ -117,10 +145,12 @@ public sealed class ClipService
                 int outH = s.ClipHeight;
                 int outW = (int)Math.Round(srcW * (double)outH / srcH / 2) * 2;
                 (int cq, int kbps) = AppSettings.VideoQuality(s.Quality, outW, outH, fps);
-                (code, err) = Mux(listFile, partFile, stems, timeout,
+                // A constant frame rate: where the screen was still, the held picture is repeated.
+                (code, err) = Mux(listFile, partFile, stems, timeout, seconds,
                     ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
                     [
-                        "-vf", $"scale_cuda={outW}:{outH}", "-c:v", "h264_nvenc", "-preset", "p3", "-tune", "hq", "-rc", "vbr",
+                        "-vf", $"scale_cuda={outW}:{outH}", "-fps_mode", "cfr", "-r", fps.ToString(),
+                        "-c:v", "h264_nvenc", "-preset", "p3", "-tune", "hq", "-rc", "vbr",
                         "-cq", cq.ToString(), "-b:v", "0", "-maxrate", $"{kbps}k", "-bufsize", $"{kbps * 2}k", "-g", (fps * 2).ToString(),
                     ]);
                 if (code != 0)
@@ -129,15 +159,15 @@ public sealed class ClipService
                     TryDelete(partFile);
                 }
             }
-            if (code != 0) (code, err) = Mux(listFile, partFile, stems, timeout, [], ["-c:v", "copy"]);
+            if (code != 0) (code, err) = Mux(listFile, partFile, stems, timeout, seconds, [], ["-c:v", "copy"]);
             if (code != 0 && !err.StartsWith("Timed out", StringComparison.Ordinal))
             {
                 // Let FFmpeg probe every piece in full, exactly as before the quick probe existed.
                 // Skipped after a time-out so a hung save cannot run long enough for the buffer to wrap around.
                 Log.Warn($"Saving failed ({code}), retrying with full probing. {Ffmpeg.LastLine(err)}");
                 TryDelete(partFile);
-                File.WriteAllText(fullProbeListFile, ConcatList(chosen, quickProbe: false), new UTF8Encoding(false));
-                (code, err) = Mux(fullProbeListFile, partFile, stems, timeout, [], ["-c:v", "copy"]);
+                File.WriteAllText(fullProbeListFile, ConcatList(plan.Pieces, quickProbe: false), new UTF8Encoding(false));
+                (code, err) = Mux(fullProbeListFile, partFile, stems, timeout, seconds, [], ["-c:v", "copy"]);
             }
             if (code != 0 && !err.StartsWith("Timed out", StringComparison.Ordinal) && stems is { Separate: true })
             {
@@ -145,7 +175,7 @@ public sealed class ClipService
                 // tracks. The clip is kept even if the separate tracks cannot be written.
                 Log.Warn($"Saving failed ({code}), retrying with a single mixed audio track. {Ffmpeg.LastLine(err)}");
                 TryDelete(partFile);
-                (code, err) = Mux(fullProbeListFile, partFile, stems, timeout, [], ["-c:v", "copy"], mixOnly: true);
+                (code, err) = Mux(fullProbeListFile, partFile, stems, timeout, seconds, [], ["-c:v", "copy"], mixOnly: true);
             }
 
             if (code != 0 || !File.Exists(partFile) || new FileInfo(partFile).Length < 1024)
@@ -156,8 +186,8 @@ public sealed class ClipService
             }
             File.Move(partFile, finalPath);
             partFile = null;
-            Log.Info($"Clip saved: {finalPath} ({seconds:F1}s, {chosen.Count} segments, {new FileInfo(finalPath).Length / 1048576.0:F1} MB, written in {(Environment.TickCount64 - muxStart) / 1000.0:F1}s)");
-            return new ClipResult(true, finalPath, null, seconds, chosen[0].StartUtc);
+            Log.Info($"Clip saved: {finalPath} ({seconds:F1}s, {plan.Pieces.Count} segments{(plan.Parts.Count > 1 ? ", starting inside a still stretch" : "")}{(open != null ? ", screen still at the press" : "")}, {new FileInfo(finalPath).Length / 1048576.0:F1} MB, written in {(Environment.TickCount64 - muxStart) / 1000.0:F1}s)");
+            return new ClipResult(true, finalPath, null, seconds, plan.Parts[0].Start);
         }
         finally
         {
@@ -169,67 +199,103 @@ public sealed class ClipService
     }
 
     /// <summary>
-    /// The FFmpeg concat list for the chosen segments. By default FFmpeg decodes about 7 frames of every one-second
-    /// piece on a single CPU thread when it opens it, only to learn what the first piece already told it. That took
-    /// about 90 ms per piece, 8 seconds for a 90 s clip. <paramref name="quickProbe"/> limits that to the first packet.
-    /// The video that comes out is byte-for-byte the same.
+    /// The FFmpeg concat list for the clip's pieces. Each piece lasts until the next one starts, so a picture held on a
+    /// still screen stays up for as long as it was on screen. By default FFmpeg decodes about 7 frames of every
+    /// one-second piece on a single CPU thread when it opens it, only to learn what the first piece already told it.
+    /// That took about 90 ms per piece, 8 seconds for a 90 s clip. <paramref name="quickProbe"/> limits that to the
+    /// first packet. The video that comes out is byte-for-byte the same.
     /// </summary>
-    private static string ConcatList(List<Segment> chosen, bool quickProbe)
+    private static string ConcatList(List<ClipPiece> pieces, bool quickProbe)
     {
         var list = new StringBuilder("ffconcat version 1.0\n");
-        foreach (Segment seg in chosen)
+        foreach (ClipPiece piece in pieces)
         {
-            list.Append("file '").Append(seg.Path.Replace('\\', '/').Replace("'", "'\\''")).Append("'\n");
+            list.Append("file '").Append(piece.Segment.Path.Replace('\\', '/').Replace("'", "'\\''")).Append("'\n");
             if (quickProbe) list.Append("option probesize 32\n");
-            list.Append("duration ").Append((seg.EndUtc - seg.StartUtc).ToString("F6", CultureInfo.InvariantCulture)).Append('\n');
+            list.Append("duration ").Append(piece.Duration.ToString("F6", CultureInfo.InvariantCulture)).Append('\n');
         }
         return list.ToString();
     }
 
-    /// <summary>Walks back from the newest segment collecting the requested amount of compatible, recent footage.</summary>
-    private static List<Segment> ChooseSegments(List<Segment> all, double pressed, int wantSeconds)
+    /// <summary>
+    /// A clip starts with a whole piece, so it can run up to a second longer than asked. When it would start more than
+    /// this much early, it starts inside a long still stretch, and that stretch is shortened instead. A piece's own
+    /// frames all lie within its first second; after that its last picture is held.
+    /// </summary>
+    private const double TrimLead = 1.2;
+
+    /// <summary>
+    /// Picks the footage for a clip of <paramref name="wantSeconds"/>: walking back from the newest piece, through
+    /// pieces that can be joined (see <see cref="VideoRecorder.CanJoin"/>). The clip ends with the newest piece, or at
+    /// the press when FFmpeg was running all along since that piece ended (a still screen). Null if there is nothing.
+    /// </summary>
+    internal static ClipPlan? Plan(List<Segment> all, double pressed, int wantSeconds, Func<double, double, bool> wasRecording)
     {
-        var chosen = new List<Segment>();
-        double total = 0;
-        for (int i = all.Count - 1; i >= 0; i--)
+        int last = all.Count - 1;
+        while (last >= 0 && all[last].StartUtc > pressed + 0.5) last--;
+        if (last < 0) return null;
+        Segment newest = all[last];
+        if (!File.Exists(newest.Path)) return null;
+        double end = newest.EndUtc;
+        if (end < pressed)
         {
-            Segment seg = all[i];
-            if (seg.StartUtc > pressed + 0.5) continue;
-            if (chosen.Count == 0)
-            {
-                if (pressed - seg.EndUtc > 5.0) break;                    // newest footage is stale: recorder is down
-            }
-            else
-            {
-                Segment next = chosen[^1];
-                if (seg.ParamsKey != next.ParamsKey) break;               // resolution/quality changed here
-                if (next.StartUtc - seg.EndUtc > 5.0) break;              // recording was interrupted for a while
-            }
-            if (!File.Exists(seg.Path)) break;
-            chosen.Add(seg);
-            total += seg.EndUtc - seg.StartUtc;
-            if (total >= wantSeconds - 0.01) break;
+            if (wasRecording(end, pressed)) end = pressed;          // the screen was still: hold its picture to the press
+            else if (pressed - end > 5.0) return null;              // newest footage is stale: recorder is down
         }
-        chosen.Reverse();
-        return chosen;
+
+        double start = end - wantSeconds;
+        var chosen = new List<Segment> { newest };
+        for (int i = last - 1; i >= 0 && chosen[0].StartUtc > start + 0.01; i--)
+        {
+            Segment seg = all[i], next = chosen[0];
+            if (seg.ParamsKey != next.ParamsKey) break;              // resolution/quality/capture changed here
+            double gap = next.StartUtc - seg.EndUtc;
+            if (gap < -0.05) break;
+            if (gap > 5.0 && !wasRecording(seg.EndUtc, next.StartUtc)) break;   // recording was interrupted for a while
+            if (!File.Exists(seg.Path)) break;
+            chosen.Insert(0, seg);
+        }
+
+        // Each piece lasts until the next one starts (holding its last picture over a restart gap), the last until the end.
+        var pieces = new List<ClipPiece>();
+        for (int k = 0; k < chosen.Count; k++)
+        {
+            // Never shorter than the piece itself, so its frames cannot run into the next piece's.
+            double until = k + 1 < chosen.Count ? Math.Max(chosen[k + 1].StartUtc, chosen[k].EndUtc) : end;
+            pieces.Add(new ClipPiece(chosen[k], until - chosen[k].StartUtc));
+        }
+
+        var parts = new List<(double Start, double End)>();
+        Segment first = chosen[0];
+        double firstUntil = first.StartUtc + pieces[0].Duration;
+        if (first.StartUtc < start - TrimLead && firstUntil - start >= TrimLead)
+        {
+            // The clip starts while the first piece's picture was held on a still screen. Show the piece's own frames,
+            // then only the part of the hold that falls inside the clip.
+            pieces[0] = new ClipPiece(first, firstUntil - start);
+            parts.Add((first.StartUtc, first.StartUtc + TrimLead));
+            parts.Add((start + TrimLead, end));
+        }
+        else if (first.StartUtc < start - TrimLead && chosen.Count > 1)
+        {
+            // Hardly any of the first piece's hold falls inside the clip: start with the next piece.
+            pieces.RemoveAt(0);
+            parts.Add((chosen[1].StartUtc, end));
+        }
+        else
+        {
+            parts.Add((first.StartUtc, end));
+        }
+        return new ClipPlan(pieces, parts);
     }
 
     /// <summary>
-    /// Lays desktop and microphone audio out against the chosen video, sample-accurately by wall-clock time.
-    /// Each source is rendered on its own; the clip gets them as separate tracks plus their mix. With separate app
-    /// tracks on, the desktop sound is split into one track per app when those tracks account for it.
+    /// Lays desktop and microphone audio out against the clip's stretches of time, sample-accurately by wall-clock
+    /// time. Each source is rendered on its own; the clip gets them as separate tracks plus their mix. With separate
+    /// app tracks on, the desktop sound is split into one track per app when those tracks account for it.
     /// </summary>
-    private ClipStems BuildAudio(List<Segment> chosen, AppSettings s, double? silenceFromUtc)
+    private ClipStems BuildAudio(List<(double Start, double End)> parts, AppSettings s, double? silenceFromUtc)
     {
-        // Group back-to-back segments so each uninterrupted stretch of video gets one stretch of audio.
-        var parts = new List<(double Start, double End)>();
-        foreach (Segment seg in chosen)
-        {
-            if (parts.Count > 0 && Math.Abs(seg.StartUtc - parts[^1].End) < 0.02)
-                parts[^1] = (parts[^1].Start, seg.EndUtc);
-            else
-                parts.Add((seg.StartUtc, seg.EndUtc));
-        }
         long totalFrames = parts.Sum(p => (long)Math.Round((p.End - p.Start) * AudioRing.SampleRate));
         short[]? desktop = s.DesktopAudio ? new short[totalFrames * 2] : null;
         short[]? mic = s.Microphone ? new short[totalFrames * 2] : null;
@@ -307,11 +373,18 @@ public sealed class ClipService
         return totalFrames - cutFrame;
     }
 
-    private (int Code, string Err) Mux(string listFile, string output, ClipStems? stems, int timeoutMs,
+    /// <param name="seconds">
+    /// The clip's length. The last frame is made to last until then: on a still screen the picture it shows was held
+    /// to the end, and without this the video would stop early while the sound goes on. It is done as the pieces are
+    /// read, so when the clip is re-encoded at a constant frame rate the held picture is repeated to the end.
+    /// </param>
+    private (int Code, string Err) Mux(string listFile, string output, ClipStems? stems, int timeoutMs, double seconds,
         string[] inputOptions, string[] videoOptions, bool mixOnly = false)
     {
         var args = new List<string> { "-hide_banner", "-loglevel", "error", "-nostats", "-y" };
         args.AddRange(inputOptions);
+        string total = seconds.ToString("F6", CultureInfo.InvariantCulture);
+        args.AddRange(["-bsf:v", $"setts=duration='if(eq(NEXT_PTS,NOPTS),max(DURATION,{total}/TB-(PTS-STARTPTS)),DURATION)'"]);
         args.AddRange(["-f", "concat", "-safe", "0", "-i", listFile]);
         if (stems != null) ClipAudio.AddPipeInput(args, stems);
         args.AddRange(["-map", "0:v:0"]);

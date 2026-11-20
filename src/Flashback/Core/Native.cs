@@ -16,6 +16,15 @@ internal static class Win32
     [DllImport("user32.dll")]
     public static extern int GetSystemMetrics(int index);
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT
+    {
+        public int X, Y;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromPoint(POINT pt, uint flags);
+
     [DllImport("user32.dll")]
     public static extern int GetSystemMetricsForDpi(int index, uint dpi);
 
@@ -141,10 +150,13 @@ public sealed class JobObject : IDisposable
     }
 }
 
-/// <summary>Finds the main (primary) monitor the way FFmpeg's ddagrab numbers outputs.</summary>
+/// <summary>
+/// Finds the main (primary) monitor: its handle for Windows Graphics Capture, and its number the way FFmpeg's
+/// ddagrab counts outputs.
+/// </summary>
 public static unsafe class DisplayInfo
 {
-    public readonly record struct PrimaryDisplay(int OutputIndex, int Width, int Height);
+    public readonly record struct PrimaryDisplay(int OutputIndex, int Width, int Height, long Monitor);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct DXGI_OUTPUT_DESC
@@ -186,7 +198,7 @@ public static unsafe class DisplayInfo
                         if (hr >= 0 && desc.AttachedToDesktop != 0 && desc.Left == 0 && desc.Top == 0)
                         {
                             int w = desc.Right - desc.Left, h = desc.Bottom - desc.Top;
-                            if (w > 0 && h > 0) return new PrimaryDisplay((int)i, w, h);
+                            if (w > 0 && h > 0) return new PrimaryDisplay((int)i, w, h, desc.Monitor != IntPtr.Zero ? (long)desc.Monitor : PrimaryMonitor());
                         }
                     }
                 }
@@ -201,8 +213,11 @@ public static unsafe class DisplayInfo
             Release(adapter);
             Release(factory);
         }
-        return new PrimaryDisplay(0, Math.Max(2, Win32.GetSystemMetrics(0)), Math.Max(2, Win32.GetSystemMetrics(1)));
+        return new PrimaryDisplay(0, Math.Max(2, Win32.GetSystemMetrics(0)), Math.Max(2, Win32.GetSystemMetrics(1)), PrimaryMonitor());
     }
+
+    /// <summary>The primary monitor is the one at the desktop origin (MONITOR_DEFAULTTOPRIMARY).</summary>
+    private static long PrimaryMonitor() => (long)Win32.MonitorFromPoint(default, 1);
 }
 
 /// <summary>System-wide hotkey. Works while a game has focus.</summary>

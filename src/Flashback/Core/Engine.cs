@@ -133,7 +133,7 @@ public sealed class Engine : IDisposable
         if (Recorder == null) return;
         RecorderConfig? active = Recorder.Status.Config;
         var d = DisplayInfo.GetPrimary();
-        if (active == null || active.OutputIndex != d.OutputIndex || active.Width != d.Width || active.Height != d.Height)
+        if (active == null || active.OutputIndex != d.OutputIndex || active.Monitor != d.Monitor || active.Width != d.Width || active.Height != d.Height)
             Recorder.RequestRestart("display changed");
     }
 
@@ -159,6 +159,7 @@ public sealed class Engine : IDisposable
         return new RecorderConfig
         {
             OutputIndex = d.OutputIndex,
+            Monitor = d.Monitor,
             Width = d.Width,
             Height = d.Height,
             Fps = fps,
