@@ -10,9 +10,9 @@ using Flashback.Core;
 namespace Flashback;
 
 /// <summary>
-/// The clip player: video through a MediaElement, audio through <see cref="StemPlayer"/> so each app and the
-/// microphone can be balanced while watching, a timeline for trimming, and full-screen viewing. Trimmed copies are
-/// written by <see cref="ClipEditor"/>.
+/// The clip player: video through a <see cref="VideoView"/>, audio through <see cref="StemPlayer"/> so each app and
+/// the microphone can be balanced while watching, a timeline for trimming, and full-screen viewing. Trimmed copies
+/// are written by <see cref="ClipEditor"/>.
 /// </summary>
 public partial class MainWindow
 {
@@ -81,6 +81,13 @@ public partial class MainWindow
             if (_scrubPending && Environment.TickCount64 - _lastScrubSeek >= ScrubSeekIntervalMs) ApplyScrubSeek();
         };
         _volumeSave.Tick += (_, _) => SaveVolume();
+        Video.Opened += Video_Opened;
+        Video.Ended += Video_Ended;
+        Video.Failed += Video_Failed;
+        // The video is a window of its own that WPF cannot draw over: keep the full-screen bar's strip clear of it.
+        Video.SizeChanged += (_, _) => UpdateVideoCut();
+        ControlBar.SizeChanged += (_, _) => UpdateVideoCut();
+        ControlBar.IsVisibleChanged += (_, _) => UpdateVideoCut();
         SeekSlider.SizeChanged += (_, _) => AlignSeekSlider();
         VolumeSlider.Value = _engine.Settings.Current.PlayerVolume;
         _volumeReady = true;
@@ -125,8 +132,9 @@ public partial class MainWindow
         {
             // The clip's mixed track plays until its separate tracks are decoded, then those take over.
             ApplyVolume();
-            Player.Source = new Uri(item.Path);
-            Player.Play();
+            Video.Visibility = Visibility.Visible;
+            Video.Open(item.Path);
+            Video.Play();
             _isPlaying = true;
         }
         catch (Exception ex)
@@ -152,13 +160,7 @@ public partial class MainWindow
         _stemPlayer?.Dispose();
         _stemPlayer = null;
         _info = null;
-        try
-        {
-            Player.Stop();
-            Player.Close();   // releases the file so it can be renamed or deleted
-            Player.Source = null;
-        }
-        catch { }
+        Video.Close(); // releases the file so it can be renamed or deleted
         _playing = null;
         _isPlaying = false;
         PlayerOverlay.Visibility = Visibility.Collapsed;
@@ -370,6 +372,7 @@ public partial class MainWindow
     {
         PlayerError.Text = "This clip could not be played here.\n" + message + "\nRight-click the clip and choose \"Open in default player\".";
         PlayerError.Visibility = Visibility.Visible;
+        Video.Visibility = Visibility.Collapsed; // the message would be under the video's window otherwise
         _isPlaying = false;
         UpdatePlayGlyph();
     }
@@ -381,7 +384,7 @@ public partial class MainWindow
     private void SetPlayGlyph(bool playing) => PlayPauseGlyph.Text = playing ? "" : "";
 
     private double VideoDuration => Timeline.Duration > 0 ? Timeline.Duration
-        : Player.NaturalDuration.HasTimeSpan ? Player.NaturalDuration.TimeSpan.TotalSeconds : 0;
+        : Video.Duration;
 
     private double Fps => _info is { Fps: > 0 } i ? i.Fps : 60;
 
@@ -395,13 +398,13 @@ public partial class MainWindow
             SetPlayGlyph(_resumeAfterScrub);
             return;
         }
-        if (_isPlaying) Player.Pause();
+        if (_isPlaying) Video.Pause();
         else
         {
-            double pos = Player.Position.TotalSeconds, total = VideoDuration;
+            double pos = Video.Position, total = VideoDuration;
             if (total > 0 && pos >= total - 0.05) SeekTo(Timeline.IsTrimmed ? Timeline.TrimStart : 0);
             else if (Timeline.IsTrimmed && pos >= Timeline.TrimEnd - 0.05) SeekTo(Timeline.TrimStart);
-            Player.Play();
+            Video.Play();
         }
         _isPlaying = !_isPlaying;
         UpdatePlayGlyph();
@@ -409,7 +412,7 @@ public partial class MainWindow
 
     private void PauseAt(double seconds)
     {
-        Player.Pause();
+        Video.Pause();
         _isPlaying = false;
         SeekTo(seconds);
         UpdatePlayGlyph();
@@ -425,7 +428,7 @@ public partial class MainWindow
     {
         if (_playing == null) return;
         seconds = ClampToClip(seconds);
-        Player.Position = TimeSpan.FromSeconds(seconds);
+        Video.Position = seconds;
         _prevTickPos = seconds;
         _stemPlayer?.Seek(seconds);
         ShowPosition(seconds);
@@ -444,11 +447,11 @@ public partial class MainWindow
         _resumeAfterScrub = _isPlaying;
         if (_isPlaying)
         {
-            Player.Pause();
+            Video.Pause();
             _isPlaying = false;
         }
         if (_stemPlayer != null) _stemPlayer.Playing = false;
-        _scrubTarget = Player.Position.TotalSeconds;
+        _scrubTarget = Video.Position;
         _scrubApplied = -1;
         _scrubPending = false;
         _lastScrubSeek = 0;
@@ -476,7 +479,7 @@ public partial class MainWindow
         _lastScrubSeek = Environment.TickCount64;
         _scrubApplied = _scrubTarget;
         _scrubSeeks++;
-        Player.Position = TimeSpan.FromSeconds(_scrubTarget);
+        Video.Position = _scrubTarget;
     }
 
     private void EndScrub()
@@ -486,13 +489,13 @@ public partial class MainWindow
         _scrubTimer.Stop();
         if (_playing == null) return;
         double target = _scrubTarget;
-        if (target != _scrubApplied) Player.Position = TimeSpan.FromSeconds(target);
+        if (target != _scrubApplied) Video.Position = target;
         _prevTickPos = target;
         _stemPlayer?.Seek(target);
         ShowPosition(target);
         if (_resumeAfterScrub)
         {
-            Player.Play();
+            Video.Play();
             _isPlaying = true;
             _lastVideoPos = -1;
         }
@@ -502,7 +505,7 @@ public partial class MainWindow
     private void SeekBy(double seconds)
     {
         if (_playing == null) return;
-        SeekTo(Player.Position.TotalSeconds + seconds);
+        SeekTo(Video.Position + seconds);
     }
 
     private void StepFrame(int frames)
@@ -510,11 +513,11 @@ public partial class MainWindow
         if (_playing == null) return;
         if (_isPlaying)
         {
-            Player.Pause();
+            Video.Pause();
             _isPlaying = false;
             UpdatePlayGlyph();
         }
-        SeekTo(Player.Position.TotalSeconds + frames / Fps);
+        SeekTo(Video.Position + frames / Fps);
     }
 
     /// <summary>
@@ -546,8 +549,8 @@ public partial class MainWindow
 
     private void RefreshPlayerPosition()
     {
-        if (_playing == null || !Player.NaturalDuration.HasTimeSpan) return;
-        double pos = Player.Position.TotalSeconds;
+        if (_playing == null || !Video.HasDuration) return;
+        double pos = Video.Position;
         long now = Environment.TickCount64;
         bool advanced = pos != _lastVideoPos;
         if (advanced)
@@ -587,10 +590,10 @@ public partial class MainWindow
         return t.TotalHours >= 1 ? t.ToString(@"h\:mm\:ss") : t.ToString(@"m\:ss");
     }
 
-    private void Player_MediaOpened(object sender, RoutedEventArgs e)
+    private void Video_Opened()
     {
-        if (!Player.NaturalDuration.HasTimeSpan) return;
-        if (Timeline.Duration <= 0) ApplyDuration(Player.NaturalDuration.TimeSpan.TotalSeconds);
+        if (!Video.HasDuration) return;
+        if (Timeline.Duration <= 0) ApplyDuration(Video.Duration);
         if (_startAt > 0)
         {
             // Opened from a still in the Latest panel: start where that still is. The clip's separate audio, once it
@@ -601,18 +604,33 @@ public partial class MainWindow
         }
     }
 
-    private void Player_MediaEnded(object sender, RoutedEventArgs e)
+    private void Video_Ended()
     {
-        Player.Pause();
+        Video.Pause();
         _isPlaying = false;
         if (_stemPlayer != null) _stemPlayer.Playing = false;
         UpdatePlayGlyph();
     }
 
-    private void Player_MediaFailed(object? sender, ExceptionRoutedEventArgs e)
+    private void Video_Failed(string message)
     {
-        Log.Warn("Playback failed: " + e.ErrorException?.Message);
-        ShowPlayerError(e.ErrorException?.Message ?? "");
+        Log.Warn("Playback failed: " + message);
+        ShowPlayerError(message);
+    }
+
+    /// <summary>
+    /// In full screen the control bar floats over the bottom of the video. WPF cannot draw over the video's window, so
+    /// while the bar shows, the video leaves out the strip the bar covers (the bar is nearly opaque, so it looks the same).
+    /// </summary>
+    private void UpdateVideoCut()
+    {
+        double cut = 0;
+        if (_fullscreen && ControlBar.IsVisible && Video.IsVisible && Video.ActualHeight > 0)
+        {
+            double barTop = ControlBar.TranslatePoint(new Point(0, 0), Video).Y;
+            cut = Math.Clamp(Video.ActualHeight - barTop, 0, Video.ActualHeight);
+        }
+        Video.CutBottom = cut;
     }
 
     private void PlayPause_Click(object sender, RoutedEventArgs e) => TogglePlay();
@@ -643,7 +661,7 @@ public partial class MainWindow
 
     private void Seek_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_updatingSeek || _playing == null || Player == null) return;
+        if (_updatingSeek || _playing == null || Video == null) return;
         ScrubTo(e.NewValue);
     }
 
@@ -702,14 +720,14 @@ public partial class MainWindow
         {
             _stemPlayer.Volume = master;
             _stemPlayer.Muted = silent;
-            Player.IsMuted = true;
+            Video.IsMuted = true;
         }
         else
         {
             // The video's own (mixed) sound: its track slider and the volume together.
             float[] gains = Gains;
-            Player.IsMuted = silent;
-            Player.Volume = Math.Clamp((gains.Length > 0 ? gains.Max() : 1) * master, 0, 1);
+            Video.IsMuted = silent;
+            Video.Volume = Math.Clamp((gains.Length > 0 ? gains.Max() : 1) * master, 0, 1);
         }
 
         double v = VolumeSlider.Value;
@@ -825,6 +843,7 @@ public partial class MainWindow
             Panel.SetZIndex(ControlBar, 0);
         }
         UpdateFrame();
+        UpdateVideoCut();
         FullscreenGlyph.Text = on ? "\uE73F" : "\uE740";
         FullscreenButton.ToolTip = on ? "Exit full screen (F, Esc)" : "Full screen (F)";
     }
@@ -865,7 +884,7 @@ public partial class MainWindow
     private void SetTrimHere(bool start)
     {
         if (_playing == null || Timeline.Duration <= 0) return;
-        double pos = Player.Position.TotalSeconds;
+        double pos = Video.Position;
         if (start) Timeline.TrimStart = Math.Min(pos, Math.Max(0, Timeline.TrimEnd - 0.5));
         else Timeline.TrimEnd = Math.Max(pos, Math.Min(Timeline.Duration, Timeline.TrimStart + 0.5));
         UpdateTrimInfo();
@@ -934,10 +953,10 @@ public partial class MainWindow
 
     public string PlayerDebug()
     {
-        double video = Player.Position.TotalSeconds;
+        double video = Video.Position;
         string stems = _stemPlayer is { } sp ? $"stems=on heard={sp.HeardSeconds:F2} drift={sp.HeardSeconds - video:F3}" : "stems=off";
-        return $"hasDuration={Player.NaturalDuration.HasTimeSpan} duration={(Player.NaturalDuration.HasTimeSpan ? Player.NaturalDuration.TimeSpan.TotalSeconds : 0):F2} " +
-               $"position={video:F2} video={Player.NaturalVideoWidth}x{Player.NaturalVideoHeight} hasAudio={Player.HasAudio} error={PlayerError.Visibility == Visibility.Visible} " +
+        return $"hasDuration={Video.HasDuration} duration={Video.Duration:F2} " +
+               $"position={video:F2} video={Video.NaturalWidth}x{Video.NaturalHeight} shown={Video.ActualWidth:0}x{Video.ActualHeight:0} hasAudio={Video.HasAudio} error={PlayerError.Visibility == Visibility.Visible} " +
                $"info={(_info == null ? "none" : $"{_info.Width}x{_info.Height}@{_info.Fps:0.##} {_info.Seconds:F2}s audio={_info.AudioStreams}")} {stems} note=\"{AudioNoteText.Text}\"";
     }
 
@@ -963,7 +982,7 @@ public partial class MainWindow
             double clicked = track.ValueFromPoint(TranslatePoint(new Point(head, 0), track));
             parts.Add($"{t:F2}s thumb-playhead={thumbCentre - head:+0.0;-0.0;0.0}px click={clicked:F2}s");
         }
-        ShowPosition(Player.Position.TotalSeconds);
+        ShowPosition(Video.Position);
         return $"seek bar margin {SeekSlider.Margin.Left:0.#}/{SeekSlider.Margin.Right:0.#}, timeline {Timeline.ActualWidth:0} px: " + string.Join("; ", parts);
     }
 
@@ -975,7 +994,7 @@ public partial class MainWindow
         var steps = new List<string>();
         void Step(string name) => steps.Add($"{name}: slider={VolumeSlider.Value:0} muted={_muted} " +
             $"stems={(_stemPlayer is { } sp ? $"{sp.Volume:F4}{(sp.Muted ? " (silent)" : "")}" : "off")} " +
-            $"video={Player.Volume:F4}{(Player.IsMuted ? " (muted)" : "")} icon=U+{(int)MuteGlyph.Text[0]:X4}");
+            $"video={Video.Volume:F4}{(Video.IsMuted ? " (muted)" : "")} icon=U+{(int)MuteGlyph.Text[0]:X4}");
         VolumeSlider.Value = 50; Step("set 50%");
         ToggleMute(); Step("M");
         NudgeVolume(5); Step("Up");
@@ -1007,6 +1026,6 @@ public partial class MainWindow
         EndScrub();
         await Task.Delay(600);
         return $"{moves} moves in {watch.ElapsedMilliseconds} ms gave {_scrubSeeks - seeksBefore} video seeks; let go at {target:F2}s, " +
-               $"video now at {Player.Position.TotalSeconds:F2}s, playing={_isPlaying} (was {wasPlaying}), {PlayerDebug()}";
+               $"video now at {Video.Position:F2}s, playing={_isPlaying} (was {wasPlaying}), {PlayerDebug()}";
     }
 }

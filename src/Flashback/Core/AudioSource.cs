@@ -37,9 +37,11 @@ public sealed unsafe class AudioSource
     private int _srcRate = AudioRing.SampleRate, _srcChannels = 2, _srcBits = 16;
     private bool _srcFloat, _direct;
     private bool _resync;
+    /// <summary>QPC time (100 ns units) the next packet starts at if it follows straight on from the last one kept; 0 if unknown.</summary>
+    private long _nextQpc;
     private int _runaways;
     private int _gapFrames;
-    private double _gapTime;
+    private double _gapTime, _gapQpc;
     private double _resamplePos;
     private float _prevL, _prevR;
 
@@ -200,6 +202,8 @@ public sealed unsafe class AudioSource
         string? wantedId = _deviceId;
 
         AudioClient client = Initialize(device);
+        _resync = true;
+        _nextQpc = 0;
         try
         {
             AudioCaptureClient capture = client.AudioCaptureClient;
@@ -216,7 +220,13 @@ public sealed unsafe class AudioSource
                     IntPtr buffer = capture.GetBuffer(out int frames, out AudioClientBufferFlags flags, out _, out long qpc);
                     try
                     {
-                        if (frames > 0 && (flags & AudioClientBufferFlags.Silent) == 0) Handle(buffer, frames, qpc);
+                        // Silent packets are left out, so the next sound is placed by its own time (see Follow).
+                        if ((flags & AudioClientBufferFlags.TimestampError) != 0) qpc = 0;
+                        if (frames > 0 && (flags & AudioClientBufferFlags.Silent) == 0)
+                        {
+                            Follow(frames, qpc, flags);
+                            Handle(buffer, frames, qpc);
+                        }
                     }
                     finally
                     {
@@ -256,6 +266,7 @@ public sealed unsafe class AudioSource
         AudioClient client = ProcessLoopback.Activate(_processId);
         _resync = true;
         _gapFrames = 0;
+        _nextQpc = 0;
         using var ready = new AutoResetEvent(false);
         try
         {
@@ -285,8 +296,10 @@ public sealed unsafe class AudioSource
                     IntPtr buffer = capture.GetBuffer(out int frames, out AudioClientBufferFlags flags, out _, out long qpc);
                     try
                     {
+                        if ((flags & AudioClientBufferFlags.TimestampError) != 0) qpc = 0;
+                        if (frames > 0) Follow(frames, qpc, flags);
                         if (frames > 0 && (flags & AudioClientBufferFlags.Silent) == 0) Handle(buffer, frames, qpc);
-                        else if (frames > 0) AddGap(PacketTime(frames, qpc), frames);
+                        else if (frames > 0) AddGap(PacketTime(frames, qpc, out double at), at, frames);
                     }
                     finally
                     {
@@ -374,23 +387,64 @@ public sealed unsafe class AudioSource
         }
     }
 
-    /// <summary>Wall-clock time of a packet's first frame. WASAPI reports it on the performance-counter clock.</summary>
-    private double PacketTime(int frames, long qpc100ns)
+    /// <summary>
+    /// Wall-clock time of a packet's first frame. WASAPI reports it on the performance-counter clock, which
+    /// <paramref name="qpc"/> returns in seconds (0 if it cannot be used).
+    /// </summary>
+    private double PacketTime(int frames, long qpc100ns, out double qpc)
     {
         double now = Clock.UtcNow();
-        double age = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency - qpc100ns / 1e7;
-        return qpc100ns > 0 && age > -0.005 && age < 2.0
-            ? now - Math.Max(age, 0)
-            : now - frames / (double)_srcRate;
+        if (QpcUsable(qpc100ns, out double age))
+        {
+            qpc = qpc100ns / 1e7;
+            return now - age;
+        }
+        qpc = 0;
+        return now - frames / (double)_srcRate;
+    }
+
+    /// <summary>
+    /// Whether a packet's QPC time can be used, and how long ago it was. The desktop capture stamps a packet with the
+    /// time it reaches the speakers, which is a few milliseconds ahead (measured 3 to 11 ms on the user's PC).
+    /// Treating those as invalid (as before) placed most desktop packets by when they were read instead, up to 16 ms off.
+    /// </summary>
+    private static bool QpcUsable(long qpc100ns, out double age)
+    {
+        age = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency - qpc100ns / 1e7;
+        return qpc100ns > 0 && age > -0.1 && age < 2.0;
+    }
+
+    /// <summary>
+    /// Marks a packet that does not follow straight on from the last one kept, so it is placed by its own timestamp:
+    /// Windows dropped audio (a busy PC stalls a capture for tens of milliseconds, and every app capture drops packets
+    /// when another one opens), or silent packets were left out. Otherwise packets follow on by their sample count and
+    /// only gaps over 30 ms move them (<see cref="AudioRing.Render"/>), so each lost 10 ms packet shifted an app's
+    /// sound 10 ms early for the rest of the clip, out of line with the desktop sound.
+    /// </summary>
+    private void Follow(int frames, long qpc100ns, AudioClientBufferFlags flags)
+    {
+        bool usable = QpcUsable(qpc100ns, out _);
+        bool lost = (flags & AudioClientBufferFlags.DataDiscontinuity) != 0
+                    || (usable && _nextQpc != 0 && Math.Abs(qpc100ns - _nextQpc) > 10_000);
+        if (lost)
+        {
+            FlushGap();
+            _resync = true;
+        }
+        _nextQpc = usable ? qpc100ns + frames * 10_000_000L / _srcRate : 0;
     }
 
     /// <summary>
     /// App capture: silence is not stored but counted, and handed to the ring as a gap (at least once a second so
     /// old audio can still be trimmed), so the next sound lands sample-exactly where it was played.
     /// </summary>
-    private void AddGap(double time, int frames)
+    private void AddGap(double time, double qpc, int frames)
     {
-        if (_gapFrames == 0) _gapTime = time;
+        if (_gapFrames == 0)
+        {
+            _gapTime = time;
+            _gapQpc = qpc;
+        }
         _gapFrames += frames;
         if (_gapFrames >= AudioRing.SampleRate) FlushGap();
     }
@@ -398,14 +452,14 @@ public sealed unsafe class AudioSource
     private void FlushGap()
     {
         if (_gapFrames == 0) return;
-        Ring.AppendGap(_gapTime, _gapFrames, _resync);
+        Ring.AppendGap(_gapTime, _gapFrames, _resync, _gapQpc);
         _resync = false;
         _gapFrames = 0;
     }
 
     private void Handle(IntPtr buffer, int frames, long qpc100ns)
     {
-        double time = PacketTime(frames, qpc100ns);
+        double time = PacketTime(frames, qpc100ns, out double qpc);
 
         int outFrames = Convert(buffer, frames);
         if (outFrames <= 0) return;
@@ -427,15 +481,16 @@ public sealed unsafe class AudioSource
             // few milliseconds each time (enough to scramble speech between words in Discord).
             if (max <= 2)
             {
-                AddGap(time, outFrames);
+                AddGap(time, qpc, outFrames);
                 return;
             }
             FlushGap();
-            Ring.Append(time, samples, _resync);
+            Ring.Append(time, samples, _resync, qpc);
             _resync = false;
             return;
         }
-        Ring.Append(time, samples);
+        Ring.Append(time, samples, _resync, qpc);
+        _resync = false;
     }
 
     private void EnsureScratch(int frames)

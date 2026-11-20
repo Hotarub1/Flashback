@@ -1287,7 +1287,7 @@ public partial class MainWindow : Window
         await Task.Delay(2000);
         double expected = Index * VideoDuration / ClipLibrary.FilmstripFrames;
         string result = $"still {Index + 1} of {HeroFrames.Children.Count} should start the clip at {expected:0.00}s; 2 s after the click " +
-                        $"the video is at {Player.Position.TotalSeconds:0.00}s (open={_playing != null}, playing={_isPlaying})";
+                        $"the video is at {Video.Position:0.00}s (open={_playing != null}, playing={_isPlaying})";
         ClosePlayerForTest();
         return result;
     }

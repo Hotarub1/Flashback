@@ -4,6 +4,12 @@ namespace Flashback.Core;
 /// In-memory history of one audio source as 48 kHz stereo 16-bit samples. Every captured packet keeps the
 /// wall-clock time it was recorded at, so any time range can later be laid out exactly against the video.
 /// Silence (no packets) simply leaves a gap.
+///
+/// Packets also keep Windows' performance-counter (QPC) time when the capture reported one. The wall clock drifts
+/// against the audio clock (about 40 microseconds per second on the user's PC, as Windows keeps the clock in time), so
+/// within a stretch of audio only the first packet is placed by its wall-clock time and the others by their QPC time
+/// relative to it. Every source then agrees on where a sound belongs to the sample, which lining the app tracks up
+/// against the desktop sound needs.
 /// </summary>
 public sealed class AudioRing
 {
@@ -12,9 +18,11 @@ public sealed class AudioRing
     private const int ForwardTolerance = 1440;      // 30 ms: larger forward jumps are real gaps
     private const int BackwardTolerance = 4800;     // 100 ms
 
-    private readonly struct Packet(double time, long start, int frames, bool resync, bool gap)
+    private readonly struct Packet(double time, long start, int frames, bool resync, bool gap, double qpc)
     {
         public readonly double Time = time;
+        /// <summary>QPC time in seconds, or 0 if the capture did not report a usable one.</summary>
+        public readonly double Qpc = qpc;
         public readonly long Start = start;
         public readonly int Frames = frames;
         public readonly bool Resync = resync;
@@ -52,8 +60,9 @@ public sealed class AudioRing
 
     /// <param name="timeUtc">Wall-clock time of the first frame.</param>
     /// <param name="stereo">Interleaved left/right samples.</param>
-    /// <param name="resync">Packets before this one were left out on purpose: place it by its own time even if the gap is short.</param>
-    public void Append(double timeUtc, ReadOnlySpan<short> stereo, bool resync = false)
+    /// <param name="resync">Packets before this one were left out or lost: place it by its own time even if the gap is short.</param>
+    /// <param name="qpc">QPC time of the first frame in seconds, or 0 if unknown.</param>
+    public void Append(double timeUtc, ReadOnlySpan<short> stereo, bool resync = false, double qpc = 0)
     {
         int frames = stereo.Length / 2;
         if (frames == 0) return;
@@ -73,7 +82,7 @@ public sealed class AudioRing
                 done += n;
                 _writeFrame += n;
             }
-            _packets.Enqueue(new Packet(timeUtc, start, frames, resync, false));
+            _packets.Enqueue(new Packet(timeUtc, start, frames, resync, false, qpc));
             TotalFrames += frames;
             LastUtc = timeUtc + frames / (double)SampleRate;
             TotalPackets++;
@@ -85,12 +94,12 @@ public sealed class AudioRing
     /// Records <paramref name="frames"/> of silence without storing it. The audio after it then follows on sample for
     /// sample, exactly as if the silence had been kept, instead of being placed by its own (slightly jittery) time.
     /// </summary>
-    public void AppendGap(double timeUtc, int frames, bool resync = false)
+    public void AppendGap(double timeUtc, int frames, bool resync = false, double qpc = 0)
     {
         if (frames <= 0) return;
         lock (_lock)
         {
-            _packets.Enqueue(new Packet(timeUtc, _writeFrame, frames, resync, true));
+            _packets.Enqueue(new Packet(timeUtc, _writeFrame, frames, resync, true, qpc));
             Trim(timeUtc - RetainSeconds);
         }
     }
@@ -116,7 +125,10 @@ public sealed class AudioRing
     /// Mixes this source's audio for [startUtc, endUtc) into <paramref name="dest"/> (interleaved stereo),
     /// beginning at frame <paramref name="destFrame"/>. Returns how many frames of real audio were written.
     /// </summary>
-    public long Render(double startUtc, double endUtc, short[] dest, long destFrame, float gain)
+    /// <param name="anchors">If given, receives the frames of <paramref name="dest"/> where audio after a gap was
+    /// placed by its own time. The sound can sit later after such a point than before it (Windows' per-app capture
+    /// falls behind after its mixer stalls), so app tracks are lined up piece by piece between these points.</param>
+    public long Render(double startUtc, double endUtc, short[] dest, long destFrame, float gain, List<long>? anchors = null)
     {
         long total = (long)Math.Round((endUtc - startUtc) * SampleRate);
         total = Math.Min(total, dest.Length / 2 - destFrame);
@@ -125,14 +137,29 @@ public sealed class AudioRing
         lock (_lock)
         {
             long pos = long.MinValue;
+            double anchorQpc = 0;
+            long anchorPos = 0;
             foreach (Packet p in _packets)
             {
                 if (p.Time + p.Frames / (double)SampleRate <= startUtc) continue;
                 if (p.Time >= endUtc) break;
-                long ideal = (long)Math.Round((p.Time - startUtc) * SampleRate);
+                // Where the packet belongs: by its QPC time relative to the first packet placed (see the class
+                // summary), or by its wall-clock time when there is no QPC time to go by.
+                bool byQpc = p.Qpc > 0 && anchorQpc > 0;
+                long ideal = byQpc ? anchorPos + (long)Math.Round((p.Qpc - anchorQpc) * SampleRate)
+                                   : (long)Math.Round((p.Time - startUtc) * SampleRate);
                 // Packets normally follow each other exactly. Only re-anchor on a real gap or a clock jump,
                 // so tiny timestamp jitter never causes clicks.
-                if (pos == long.MinValue || p.Resync || ideal - pos > ForwardTolerance || pos - ideal > BackwardTolerance) pos = ideal;
+                if (pos == long.MinValue || p.Resync || ideal - pos > ForwardTolerance || pos - ideal > BackwardTolerance)
+                {
+                    if (pos != long.MinValue && ideal > 0 && ideal < total) anchors?.Add(destFrame + ideal);
+                    pos = ideal;
+                }
+                if (p.Qpc > 0 && !byQpc)
+                {
+                    anchorQpc = p.Qpc;
+                    anchorPos = pos;
+                }
 
                 if (p.Gap)
                 {

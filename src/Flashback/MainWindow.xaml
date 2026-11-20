@@ -641,8 +641,8 @@
                         </DockPanel>
 
                         <Grid x:Name="PlayerSurface" Grid.Row="1" Background="{StaticResource EspressoDeepBrush}" MouseLeftButtonDown="PlayerSurface_MouseDown">
-                            <MediaElement x:Name="Player" LoadedBehavior="Manual" UnloadedBehavior="Manual" Stretch="Uniform" ScrubbingEnabled="True"
-                                          MediaOpened="Player_MediaOpened" MediaEnded="Player_MediaEnded" MediaFailed="Player_MediaFailed"/>
+                            <!-- Sizes itself to the clip's shape; centred, the surface around it letterboxes. -->
+                            <local:VideoView x:Name="Video" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                             <TextBlock x:Name="PlayerError" FontSize="15" Foreground="{StaticResource BeigeBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"
                                        TextAlignment="Center" TextWrapping="Wrap" Margin="40" Visibility="Collapsed"/>
                         </Grid>

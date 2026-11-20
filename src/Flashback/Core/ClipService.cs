@@ -292,7 +292,8 @@ public sealed class ClipService
     /// <summary>
     /// Lays desktop and microphone audio out against the clip's stretches of time, sample-accurately by wall-clock
     /// time. Each source is rendered on its own; the clip gets them as separate tracks plus their mix. With separate
-    /// app tracks on, the desktop sound is split into one track per app when those tracks account for it.
+    /// app tracks on, the desktop sound is split into one track per app that played sound, plus "Other sounds" for
+    /// whatever no app track caught.
     /// </summary>
     private ClipStems BuildAudio(List<(double Start, double End)> parts, AppSettings s, double? silenceFromUtc)
     {
@@ -321,6 +322,13 @@ public sealed class ClipService
                 apps = null;
                 appNote = "failed";
             }
+        }
+
+        if (apps is { Count: 1 } && mic == null)
+        {
+            // One track with nothing to balance it against: the desktop capture itself is the clip's audio.
+            appNote = $"{apps[0].Title} is the only track (no microphone)";
+            apps = null;
         }
 
         long silenced = 0;
